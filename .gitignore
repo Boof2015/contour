@@ -1,0 +1,70 @@
+# Internal research, lab reports, plans, and design notes.
+# All current docs are internal; choose public documentation separately later.
+/docs/
+/local/
+/private/
+/scratch/
+
+# Build outputs and generated CMake state.
+/build/
+/out/
+/cmake-build-*/
+/CMakeFiles/
+/CMakeScripts/
+/Testing/
+/CMakeCache.txt
+/cmake_install.cmake
+/CTestTestfile.cmake
+/install_manifest.txt
+/CMakeUserPresets.json
+*.obj
+*.pch
+*.idb
+*.ipch
+*.iobj
+*.ipdb
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.dll
+*.exe
+
+# Local editor and agent state.
+/.vs/
+/.idea/
+/.codex/
+/.agents/
+/.claude/
+/AGENTS.md
+/CLAUDE.md
+*.suo
+*.user
+*.sln.docstates
+*.VC.db
+*.VC.opendb
+
+# Captures, diagnostics, and temporary files. Keep machine-specific plans,
+# journals, measurements, and personal EQ files under build/ or local/.
+*.etl
+*.dmp
+*.log
+*.tmp
+*.bak
+*.swp
+*~
+__pycache__/
+*.pyc
+
+# Local environment values and signing keys; example config can be committed.
+.env
+.env.*
+!.env.example
+*.pfx
+*.p12
+*.key
+
+# OS metadata.
+.DS_Store
+Thumbs.db
+Desktop.ini

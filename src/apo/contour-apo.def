@@ -1,0 +1,4 @@
+LIBRARY "contour-apo"
+EXPORTS
+    DllGetClassObject PRIVATE
+    DllCanUnloadNow PRIVATE

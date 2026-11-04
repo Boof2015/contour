@@ -1,0 +1,13 @@
+#pragma once
+
+#include <guiddef.h>
+
+namespace contour::apo {
+
+// Contour-owned identities. Changing these breaks future installation state.
+inline constexpr CLSID pre_mix_clsid = {
+    0xd1f3f732, 0xfd5b, 0x48ab, {0xa9, 0x89, 0x50, 0x86, 0xb6, 0xfb, 0xea, 0x37}};
+inline constexpr CLSID post_mix_clsid = {
+    0xe841587d, 0xe457, 0x4f68, {0xa4, 0x25, 0xc9, 0x89, 0xa1, 0xdd, 0x8c, 0xff}};
+
+} // namespace contour::apo

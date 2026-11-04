@@ -1,0 +1,3 @@
+# Example PEQ settings; not a measured correction for any speaker.
+Preamp: -1 dB
+Filter 1: ON PK Fc 1000 Hz Gain -3 dB Q 2

@@ -1,0 +1,11 @@
+CONTOUR 1 48000 2
+Bypass 0
+Layer "Left" 1 0 1 0
+Filter 0 1 997 -3 2
+EndLayer
+Layer "Right" 1 0 2 0
+Filter 0 1 1499 -9 2
+EndLayer
+Layer "All" 1 1 0 -1
+EndLayer
+End

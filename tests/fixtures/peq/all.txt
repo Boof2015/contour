@@ -1,0 +1,3 @@
+# Same kind of PEQ, applied to whichever channels are selected by the caller.
+Filter 1: ON PK Fc 1000 Hz Gain 2 dB Q 2
+Filter 2: OFF HSC Fc 8000 Hz Gain -1 dB Q 0.7
