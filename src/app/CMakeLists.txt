@@ -18,6 +18,9 @@ target_link_libraries(contour-app-model PUBLIC contour-profile-device-session co
 add_library(contour-app-setup STATIC setup.cpp)
 contour_target(contour-app-setup)
 target_link_libraries(contour-app-setup PUBLIC contour-app-model shell32 user32)
+add_executable(contour-endpoint-check "${PROJECT_SOURCE_DIR}/tools/deployment/endpoint_check.cpp")
+contour_target(contour-endpoint-check)
+target_link_libraries(contour-endpoint-check PRIVATE contour-app-setup)
 add_executable(contour WIN32 main.cpp)
 contour_target(contour)
 target_include_directories(contour SYSTEM PRIVATE "${webview2_SOURCE_DIR}/build/native/include")
@@ -29,6 +32,10 @@ add_custom_target(contour-ui-assets ALL
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${PROJECT_SOURCE_DIR}/tools/deployment/contour-setup.ps1"
         "${PROJECT_SOURCE_DIR}/tools/deployment/DeviceSetup.ps1"
+        "${PROJECT_SOURCE_DIR}/tools/deployment/AudioPolicy.ps1"
+        "${PROJECT_SOURCE_DIR}/tools/deployment/SharedSetup.ps1"
+        "${PROJECT_SOURCE_DIR}/tools/deployment/EndpointDeployment.ps1"
+        "${PROJECT_SOURCE_DIR}/tools/deployment/LegacyMigration.ps1"
         "${PROJECT_SOURCE_DIR}/tools/deployment/ControlContext.ps1"
         "${PROJECT_SOURCE_DIR}/tools/deployment/Deployment.ps1"
         "${PROJECT_SOURCE_DIR}/tools/deployment/RegistryStore.cs"
@@ -38,7 +45,7 @@ add_custom_target(contour-ui-assets ALL
     COMMAND ${CMAKE_COMMAND} -E copy_if_different "${nlohmann_json_SOURCE_DIR}/LICENSE.MIT" "$<TARGET_FILE_DIR:contour>/licenses/json.txt"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different "${webview2_SOURCE_DIR}/LICENSE.txt" "$<TARGET_FILE_DIR:contour>/licenses/WebView2.txt"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different "${webview2_SOURCE_DIR}/NOTICE.txt" "$<TARGET_FILE_DIR:contour>/licenses/WebView2-NOTICE.txt")
-add_dependencies(contour contour-ui-assets contour-apo contour-deploy-info contour-apo-host)
+add_dependencies(contour contour-ui-assets contour-apo contour-deploy-info contour-apo-host contour-endpoint-check)
 if(BUILD_TESTING)
     add_executable(contour-app-tests "${PROJECT_SOURCE_DIR}/tests/app_tests.cpp")
     contour_target(contour-app-tests)

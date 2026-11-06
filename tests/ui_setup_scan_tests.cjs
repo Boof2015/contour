@@ -27,6 +27,10 @@ async function main(){
   report(ids[2]);await inspect(ids[1]);
   const details=evaluate(`deviceDetails(APP.devices[2],setupReports.get(APP.device))`);
   assert.match(details,/data-setup-act="install"\s*>/,'Another device check disabled Install on a completed row');
+  assert.doesNotMatch(details,/allow unsigned audio effects/,'Existing Windows compatibility setting should not show a change notice');
+  const changingPolicy=evaluate(`deviceDetails(APP.devices[2],{...setupReports.get(APP.device),enablesUnsignedAudio:true})`);
+  assert.match(changingPolicy,/allow unsigned audio effects/,'Installation must explain its Windows audio change');
+  assert.match(changingPolicy,/kept after removal/,'Installation must explain preservation for other APOs');
   evaluate(`S.settingsDevice=APP.device;setupAct('install');setupAct('install');`);
   assert.equal(posts.length,0,'A mutation started concurrently with inspection');
   assert.equal(evaluate('pendingSetup.endpoint'),ids[2]);

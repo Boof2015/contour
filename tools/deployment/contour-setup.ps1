@@ -7,7 +7,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
 $ProgressPreference='SilentlyContinue'
 [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)
-. (Join-Path $PSScriptRoot 'DeviceSetup.ps1')
+. (Join-Path $PSScriptRoot 'SharedSetup.ps1')
 
 function Assert-NoLink([string]$Path) {
     $item=Get-Item -LiteralPath $Path -Force
@@ -40,26 +40,89 @@ function Get-SetupPackages {
         }
     }
 }
-function Read-PackageInfo {
+function Read-PackageInfo([string]$SelectedEndpoint=$EndpointId) {
     $binary=Join-Path (Split-Path $PSScriptRoot -Parent) 'contour-deploy-info.exe'
     $dll=Join-Path (Split-Path $PSScriptRoot -Parent) 'contour-apo.dll'
-    $output=& $binary $dll $EndpointId
+    $output=& $binary $dll $SelectedEndpoint
     if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect this output and the packaged APO.' }
     $output | ConvertFrom-Json
 }
+function Read-SetupAdapter([string]$SelectedEndpoint) {
+    $binary=Join-Path (Split-Path $PSScriptRoot -Parent) 'contour-deploy-info.exe'
+    $output=& $binary --device-inventory $SelectedEndpoint
+    if ($LASTEXITCODE -ne 0) { throw 'Cannot identify the audio device. Reconnect it and check again.' }
+    $inventory=$output | ConvertFrom-Json
+    if ($inventory.EndpointId -ine $SelectedEndpoint) { throw 'Device inspection returned another endpoint.' }
+    Assert-AdapterId $inventory.AdapterId
+    return $inventory.AdapterId
+}
+function New-SharedCallbacks($Store,[string]$Package) {
+    $checker=Join-Path (Split-Path $PSScriptRoot -Parent) 'contour-endpoint-check.exe'
+    if (-not (Test-Path -LiteralPath $checker -PathType Leaf)) { throw 'Device verification files are missing. Rebuild Contour.' }
+    $verify={param($SelectedEndpoint,$Registration,$Binding)
+        Assert-SharedRegistration $Store $Package $Registration
+        $plan=(Read-SetupJson (Join-Path $Package 'journal.json')).Plan
+        if ((Get-FileHash -LiteralPath $plan.TargetDll -Algorithm SHA256).Hash -cne $plan.DllSha256) { throw 'The installed APO file changed.' }
+        $true
+    }.GetNewClosure()
+    $applied={param($SelectedEndpoint,$Registration,$Binding)
+        $mode=if ($null -eq $Binding) { 'absent' } else { 'present' }
+        $result=& $checker $mode $SelectedEndpoint
+        if ($LASTEXITCODE -ne 0) { return $false }
+        $report=$result | ConvertFrom-Json
+        return ($report.verified -is [bool] -and $report.verified)
+    }.GetNewClosure()
+    @{VerifyRegistration=$verify;VerifyApplied=$applied;CaptureServices=${function:Capture-SetupServices};
+        StopAudio=${function:Stop-SetupAudio};StartAudio=${function:Start-SetupAudio}}
+}
+function Set-SharedInspection($Store,$Package,$Report) {
+    $record=$Package.State;$catalog=Read-DeploymentState (Join-Path $Package.Path 'endpoints.json')
+    Assert-SharedCatalog $catalog $record
+    $Report.package=$Package.Path
+    if ($null -ne $catalog.Operation -and $catalog.Operation.EndpointId -ieq $EndpointId) {
+        $Report.state='recovery';$Report.installation='incomplete';$Report.canRemove=$true
+        $Report.detail='An interrupted device operation needs recovery. Uninstall Contour from the affected device before continuing.'
+        return
+    }
+    $binding=Get-Binding $catalog $EndpointId
+    $context=Get-SharedContext $record $EndpointId
+    if ($null -ne $binding) {
+        $Report.canRemove=$true
+        try {
+            Assert-SharedRegistration $Store $Package.Path (Get-Registration $catalog $record.Id)
+            Assert-EndpointAssignments $Store $catalog $EndpointId $binding
+            [void](Get-EndpointSettings $Store $EndpointId)
+            $Report.state='attached';$Report.installation='installed';$Report.detail='Contour is installed on this device.'
+        } catch { $Report.state='recovery';$Report.installation='incomplete';$Report.detail=$_.Exception.Message }
+    } elseif ($null -ne $context -and $context.ContextState -eq 'Provisioning') {
+        $Report.state='recovery';$Report.installation='incomplete';$Report.canRemove=$true
+        $Report.detail='Installation was interrupted. Uninstall it from this device before trying again.'
+    } else {
+        [void](Read-PackageInfo)
+        Assert-SharedRegistration $Store $Package.Path (Get-Registration $catalog $record.Id)
+        Assert-EndpointAssignments $Store $catalog $EndpointId $null
+        [void](New-AudioPolicyJournal $Store)
+        if ($null -ne $context -and $context.ContextState -eq 'Ready') { [void](Get-EndpointSettings $Store $EndpointId) }
+        else { [void](New-ControlContextPlan $Store $EndpointId) }
+        $Report.canInstall=$true
+    }
+    if ($null -ne $catalog.Operation) {
+        # Another endpoint owns the interrupted transaction. Keep this row's
+        # actual installation status, but serialize all setup changes.
+        $Report.canInstall=$false;$Report.canRemove=$false
+        $Report.detail='Another device has an interrupted installation. Uninstall Contour from that device before making further installation changes.'
+    }
+}
 function New-SetupPlan($Store) {
     $root=Split-Path $PSScriptRoot -Parent
-    foreach ($name in @('contour-apo.dll','contour-deploy-info.exe','contour-apo-host.exe')) {
+    foreach ($name in @('contour-apo.dll','contour-deploy-info.exe','contour-apo-host.exe','contour-endpoint-check.exe')) {
         if (-not (Test-Path -LiteralPath (Join-Path $root $name))) { throw 'The setup package is incomplete. Rebuild the Contour target.' }
     }
     $dll=Join-Path $root 'contour-apo.dll'
     $hash=(Get-FileHash -LiteralPath $dll -Algorithm SHA256).Hash
     $info=Read-PackageInfo
     if ((Get-FileHash -LiteralPath $dll -Algorithm SHA256).Hash -cne $hash) { throw 'The APO changed during inspection. Check again after the build finishes.' }
-    if (-not (Test-RawEqual ($Store.Read($script:AudioSettings,'DisableProtectedAudioDG')) ([pscustomobject]@{Type=4;Data='01000000'}))) {
-        $error=[InvalidOperationException]::new('This preview requires an audio test configuration. Public signed installation is not available in this build, and Contour does not change Windows protected-audio settings.')
-        $error.Data['reason']='preview_requirements'; throw $error
-    }
+    [void](New-AudioPolicyJournal $Store)
     $plan=New-ContourPlan $Store $info $dll $hash ([guid]::NewGuid().ToString('D'))
     [void](New-ControlContextPlan $Store $EndpointId)
     return $plan
@@ -76,13 +139,13 @@ function New-SetupPackage($Plan) {
     $acl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
     [void][IO.Directory]::CreateDirectory($path,$acl)
     $source=Split-Path $PSScriptRoot -Parent
-    foreach ($name in @('contour-apo.dll','contour-deploy-info.exe','contour-apo-host.exe')) {
+    foreach ($name in @('contour-apo.dll','contour-deploy-info.exe','contour-apo-host.exe','contour-endpoint-check.exe')) {
         Copy-Item -LiteralPath (Join-Path $source $name) -Destination (Join-Path $path $name)
     }
     # Retain self-contained recovery alongside the DLL. Installed files are
     # immutable; a rebuild in the workspace never overwrites a loaded APO.
     $scripts=Join-Path $path 'setup'; [void][IO.Directory]::CreateDirectory($scripts)
-    foreach ($name in @('contour-setup.ps1','DeviceSetup.ps1','ControlContext.ps1','Deployment.ps1','RegistryStore.cs')) {
+    foreach ($name in @('contour-setup.ps1','DeviceSetup.ps1','AudioPolicy.ps1','SharedSetup.ps1','EndpointDeployment.ps1','LegacyMigration.ps1','ControlContext.ps1','Deployment.ps1','RegistryStore.cs')) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $scripts $name)
     }
     if ((Get-FileHash -LiteralPath $Plan.TargetDll -Algorithm SHA256).Hash -cne $Plan.DllSha256) { throw 'The APO changed while it was staged. No device settings were changed.' }
@@ -139,41 +202,72 @@ try {
     $root=[Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine,[Microsoft.Win32.RegistryView]::Registry64)
     $store=[Contour.Deployment.RegistryStore]::new($root,($Action -ne 'Inspect'))
     $packages=@(Get-SetupPackages)
-    $selected=@($packages | Where-Object { $_.State.EndpointId -ceq $EndpointId })
+    $shared=@($packages | Where-Object { $_.State.Schema -eq 3 })
+    if ($shared.Count -gt 1 -or ($shared.Count -and $packages.Count -ne 1)) { throw 'Conflicting Contour installations require recovery.' }
+    $selected=@($packages | Where-Object { $_.State.Schema -ne 3 -and $_.State.EndpointId -ceq $EndpointId })
     if ($selected.Count -gt 1) { throw 'Multiple setup records exist for this output. Recover them before continuing.' }
     if ($Action -eq 'Inspect') {
         $report=[ordered]@{endpoint=$EndpointId;state='available';installation='not_installed';reason='';detail='Ready to install';canInstall=$false;canRemove=$false;package='';development=$true}
-        if ($selected.Count) {
-            $p=$selected[0]; $report.package=$p.Path; $report.canRemove=$true
-            $attached=$p.State.State -eq 'Attached' -and -not $p.State.AudioRestartPending
-            $a=Read-SetupJson (Join-Path $p.Path 'journal.json')
-            $c=if (Test-Path -LiteralPath (Join-Path $p.Path 'context-journal.json')) { Read-SetupJson (Join-Path $p.Path 'context-journal.json') } else { $null }
-            Assert-SetupJournals $p.State $a $c
-            foreach ($change in $a.Plan.Changes) { if (-not (Test-RawEqual ($store.Read($change.Path,$change.Name)) $change.After)) { $attached=$false } }
-            if ($null -eq $c -or $c.State -ne 'Provisioned') { $attached=$false }
-            if ($null -ne $c) { foreach ($key in $c.Plan.Keys) { if (-not $store.Exists($key)) { $attached=$false } } }
-            $report.state=if ($attached) { 'attached' } else { 'recovery' }
-            $report.installation=if ($attached) { 'installed' } else { 'incomplete' }
-            $report.detail=if ($attached) { 'Contour is installed on this device.' } else { 'The installation needs attention. Uninstall Contour from this device before trying again. '+$p.State.Error }
+        $report.enablesUnsignedAudio=-not (Test-RawEqual ($store.Read($script:AudioSettings,'DisableProtectedAudioDG')) (Get-UnsignedAudioValue))
+        $report.preservesAudioCompatibility=$true
+        if ($shared.Count) { Set-SharedInspection $store $shared[0] $report }
+        elseif ($selected.Count) {
+            $p=$selected[0]; $report.package=$p.Path
+            if ($p.State.Schema -eq 2) {
+                $handoffStatus=Get-HandoffSetupStatus $p.State
+                foreach ($key in $handoffStatus.Keys) { $report[$key]=$handoffStatus[$key] }
+            } else {
+                $report.canRemove=$true
+                $attached=$p.State.State -eq 'Attached' -and -not $p.State.AudioRestartPending
+                $a=Read-SetupJson (Join-Path $p.Path 'journal.json')
+                $c=if (Test-Path -LiteralPath (Join-Path $p.Path 'context-journal.json')) { Read-SetupJson (Join-Path $p.Path 'context-journal.json') } else { $null }
+                Assert-SetupJournals $p.State $a $c
+                foreach ($change in $a.Plan.Changes) { if (-not (Test-RawEqual ($store.Read($change.Path,$change.Name)) $change.After)) { $attached=$false } }
+                if ($null -eq $c -or $c.State -ne 'Provisioned') { $attached=$false }
+                if ($null -ne $c) { foreach ($key in $c.Plan.Keys) { if (-not $store.Exists($key)) { $attached=$false } } }
+                $report.state=if ($attached) { 'attached' } else { 'recovery' }
+                $report.installation=if ($attached) { 'installed' } else { 'incomplete' }
+                $report.detail=if ($attached) { 'Contour is installed on this device.' } else { 'The installation needs attention. Uninstall Contour from this device before trying again. '+$p.State.Error }
+            }
+        } elseif ($packages.Count -eq 1 -and $packages[0].State.Schema -eq 1 -and $packages[0].State.State -eq 'Attached' -and -not $packages[0].State.AudioRestartPending) {
+            # Read-only preflight for adopting an existing single-device runtime.
+            $p=$packages[0];$a=Read-SetupJson (Join-Path $p.Path 'journal.json');$c=Read-SetupJson (Join-Path $p.Path 'context-journal.json')
+            [void](Get-LegacyEndpointRecord $store $a $c (Read-SetupAdapter $p.State.EndpointId))
+            [void](Read-PackageInfo)
+            $empty=[pscustomobject]@{Registrations=@()}
+            Assert-EndpointAssignments $store $empty $EndpointId $null
+            [void](New-ControlContextPlan $store $EndpointId);[void](New-AudioPolicyJournal $store)
+            $report.canInstall=$true
         } elseif ($packages.Count) {
-            $report.state='blocked'; $report.reason='another_device'; $report.otherDevice=$packages[0].State.Name
-            $report.detail='This preview supports one installed device at a time. Uninstall Contour from '+$packages[0].State.Name+' before installing it on this device.'
+            $report.state='blocked';$report.reason='installation_recovery';$report.detail='Recover the existing Contour installation before adding another device.'
         } else {
             try { [void](New-SetupPlan $store); $report.canInstall=$true }
             catch { $report.state='blocked'; $report.reason=[string]$_.Exception.Data['reason']; $report.detail=$_.Exception.Message }
         }
         $report | ConvertTo-Json -Compress
     } elseif ($Action -eq 'Install') {
-        if ($packages.Count) { throw 'An installation or recovery is already present. Inspect and remove it first.' }
-        $plan=New-SetupPlan $store
-        if (-not $store.CanWrite(((Get-EndpointPath $EndpointId)+'\FxProperties'))) { throw 'This output does not grant effect setup access. Its permissions were not changed.' }
-        # Validate service availability before staging a recovery record.
+        if ($selected.Count) { throw 'Contour is already installed on this device, or needs recovery.' }
         [void](Capture-SetupServices)
-        $state=New-SetupPackage $plan
-        Invoke-DeviceSetup $store $state $plan.Package Install ${function:Capture-SetupServices} ${function:Stop-SetupAudio} ${function:Start-SetupAudio}
+        if ($packages.Count) {
+            if ($packages.Count -ne 1) { throw 'Recover conflicting installations first.' }
+            $p=$packages[0];$info=Read-PackageInfo;$adapter=Read-SetupAdapter $EndpointId
+            if ($p.State.Schema -ne 3) { ConvertTo-SharedSetup $store $p.Path (Read-SetupAdapter $p.State.EndpointId) }
+            $callbacks=New-SharedCallbacks $store $p.Path
+            Invoke-SharedDeviceSetup $store $p.Path Install $EndpointId $info.Endpoint.Name $adapter @callbacks
+        } else {
+            $plan=New-SetupPlan $store
+            if (-not $store.CanWrite(((Get-EndpointPath $EndpointId)+'\FxProperties'))) { throw 'This output does not grant effect setup access. Its permissions were not changed.' }
+            $state=New-SetupPackage $plan
+            Invoke-DeviceSetup $store $state $plan.Package Install ${function:Capture-SetupServices} ${function:Stop-SetupAudio} ${function:Start-SetupAudio}
+        }
     } else {
-        if ($selected.Count -ne 1) { throw 'No managed Contour installation was found for this output.' }
-        Invoke-DeviceSetup $store $selected[0].State $selected[0].Path Remove ${function:Capture-SetupServices} ${function:Stop-SetupAudio} ${function:Start-SetupAudio}
+        if ($shared.Count) {
+            $p=$shared[0];$callbacks=New-SharedCallbacks $store $p.Path
+            Invoke-SharedDeviceSetup $store $p.Path Remove $EndpointId '' '' @callbacks
+        } else {
+            if ($selected.Count -ne 1) { throw 'No managed Contour installation was found for this output.' }
+            Invoke-DeviceSetup $store $selected[0].State $selected[0].Path Remove ${function:Capture-SetupServices} ${function:Stop-SetupAudio} ${function:Start-SetupAudio}
+        }
     }
 } catch {
     if ($Action -eq 'Inspect') { @{endpoint=$EndpointId;state='blocked';installation='unknown';reason='inspection_failed';detail=$_.Exception.Message;canInstall=$false;canRemove=$false;development=$true} | ConvertTo-Json -Compress }

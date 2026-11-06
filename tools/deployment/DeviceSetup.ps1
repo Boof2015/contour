@@ -3,20 +3,73 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'ControlContext.ps1')
+. (Join-Path $PSScriptRoot 'AudioPolicy.ps1')
 
 function Get-SetupJournalPath([string] $Package, [string] $Name) { Join-Path $Package $Name }
 function Read-SetupJson([string] $Path) { Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json }
-function Save-SetupState($State, [string] $Package) { Save-ContourJournal $State (Get-SetupJournalPath $Package 'device-setup.json') }
-function Assert-SetupState($State, [string] $Package) {
+function Save-SetupState($State, [string] $Package) {
+    $path=Get-SetupJournalPath $Package 'device-setup.json'
+    if (Test-Path -LiteralPath $path) { Assert-LegacySetupAuthority $State $Package }
+    Save-ContourJournal $State $path
+}
+function Assert-LegacySetupRecord($State) {
     if ($State.Schema -ne 1 -or $State.Kind -cne 'ContourDeviceSetup') { throw 'Unrecognized device setup record.' }
     [void](Get-EndpointPath $State.EndpointId)
-    $expected=Join-Path ([Environment]::GetFolderPath('ProgramFiles')) ('ContourLab-'+([guid]::Parse($State.Id)).ToString('D'))
-    if ($Package -cne $expected) { throw 'Setup record is outside its protected package.' }
+    [void][guid]::ParseExact($State.Id,'D')
     if ($State.State -notin @('Prepared','Installing','Attached','Removing','Removed','RecoveryRequired')) { throw 'Invalid setup state.' }
     if ($State.AudioRestartPending -isnot [bool]) { throw 'Invalid audio recovery state.' }
     foreach ($service in $State.Services) {
         if ($service -notmatch '^[A-Za-z0-9_.-]{1,256}$') { throw 'Invalid service recovery record.' }
     }
+}
+function Assert-HandoffSetupRecord($State) {
+    if ($State.Schema -ne 2 -or $State.Kind -cne 'ContourDeviceSetupHandoff' -or
+        $State.State -notin @('Migrating','Migrated') -or $State.AudioRestartPending -isnot [bool] -or $State.AudioRestartPending) {
+        throw 'Unrecognized installation handoff record.'
+    }
+    [void](Get-EndpointPath $State.EndpointId)
+    foreach ($id in @($State.Id,$State.HandoffId,$State.TargetRegistrationId)) {
+        if ([guid]::ParseExact($id,'D') -eq [guid]::Empty) { throw 'Invalid installation handoff identity.' }
+    }
+    if ($State.AdapterId -isnot [string] -or $State.AdapterId -notmatch '^[^\x00-\x1f]{1,512}\z') { throw 'Invalid handoff adapter.' }
+}
+function Get-HandoffSetupStatus($State) {
+    Assert-HandoffSetupRecord $State
+    $complete=$State.State -eq 'Migrated'
+    # A retirement record is not the new owner's current installation status:
+    # that owner may since have detached this endpoint.
+    @{state=if ($complete) { 'blocked' } else { 'recovery' };
+        installation=if ($complete) { 'unknown' } else { 'incomplete' };
+        reason='installation_update';canInstall=$false;canRemove=$false;
+        detail=if ($complete) { 'Use a compatible Contour build to check or manage the updated installation on this device.' }
+            else { 'An installation update needs to finish before this device can be managed.' }}
+}
+function Assert-SetupState($State, [string] $Package) {
+    if ($State.Schema -eq 3) { Assert-SharedSetupRecord $State }
+    elseif ($State.Schema -eq 2) { Assert-HandoffSetupRecord $State } else { Assert-LegacySetupRecord $State }
+    $expected=Join-Path ([Environment]::GetFolderPath('ProgramFiles')) ('ContourLab-'+([guid]::Parse($State.Id)).ToString('D'))
+    if ($Package -cne $expected) { throw 'Setup record is outside its protected package.' }
+}
+function Assert-SharedSetupRecord($State) {
+    if ($State.Schema -ne 3 -or $State.Kind -cne 'ContourSharedSetup' -or $State.State -cne 'Shared' -or
+        $State.AudioRestartPending -isnot [bool] -or $State.AudioRestartPending) { throw 'Invalid shared installation record.' }
+    if ([guid]::ParseExact($State.Id,'D') -eq [guid]::Empty) { throw 'Invalid shared installation identity.' }
+    [void](Get-EndpointPath $State.EndpointId)
+    $seen=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($entry in $State.Contexts) {
+        [void](Get-EndpointPath $entry.EndpointId)
+        if (-not $seen.Add($entry.EndpointId) -or $entry.ContextState -notin @('Provisioning','Ready','Absent') -or
+            $entry.AdapterId -isnot [string] -or [string]::IsNullOrWhiteSpace($entry.AdapterId) -or
+            $entry.Name -isnot [string]) { throw 'Invalid shared endpoint record.' }
+    }
+}
+function Assert-LegacySetupAuthority($State,[string]$Package) {
+    Assert-LegacySetupRecord $State
+    # Reload even if the caller retained an old in-memory setup record. The
+    # schema-2 handoff also makes previously shipped setup hosts fail closed.
+    $current=Read-SetupJson (Get-SetupJournalPath $Package 'device-setup.json')
+    Assert-LegacySetupRecord $current
+    if ($current.Id -ine $State.Id -or $current.EndpointId -ine $State.EndpointId) { throw 'Installation ownership changed.' }
 }
 function Assert-SetupJournals($State, $Attachment, $Context) {
     Assert-ContourPlan $Attachment.Plan
@@ -31,6 +84,7 @@ function New-SetupState($Plan) {
         Name=$Plan.Endpoint.Name;State='Prepared';Services=@();AudioRestartPending=$false;Error=''}
 }
 function Invoke-SetupRecovery($Store, $State, [string] $Package) {
+    Assert-LegacySetupAuthority $State $Package
     $attachmentPath=Get-SetupJournalPath $Package 'journal.json'
     $contextPath=Get-SetupJournalPath $Package 'context-journal.json'
     $attachment=Read-SetupJson $attachmentPath
@@ -44,11 +98,13 @@ function Invoke-SetupRecovery($Store, $State, [string] $Package) {
     if ($null -ne $context -and -not (Invoke-ControlContextRestore $Store $context $contextPath)) {
         throw ('Control recovery needs attention: '+($context.Conflicts -join '; '))
     }
+    Preserve-UnsignedAudio (Join-Path $Package 'audio-policy.json')
 }
 function Invoke-DeviceSetup($Store, $State, [string] $Package, [string] $Action,
     [scriptblock] $CaptureServices, [scriptblock] $StopAudio, [scriptblock] $StartAudio,
     [scriptblock] $Checkpoint={param($Point)}) {
     if ($Action -notin @('Install','Remove')) { throw 'Unknown device setup operation.' }
+    Assert-LegacySetupAuthority $State $Package
     $attachment=Read-SetupJson (Get-SetupJournalPath $Package 'journal.json')
     Assert-SetupJournals $State $attachment $null
     if ($Action -eq 'Install' -and $State.State -ne 'Prepared') { throw 'Setup is already in progress or installed.' }
@@ -68,6 +124,7 @@ function Invoke-DeviceSetup($Store, $State, [string] $Package, [string] $Action,
         if ($Action -eq 'Install') {
             Invoke-ContourApply $Store $attachment (Get-SetupJournalPath $Package 'journal.json')
             & $Checkpoint 'attached'
+            Enable-UnsignedAudio $Store (Join-Path $Package 'audio-policy.json') $Checkpoint
             $context=New-ControlContextJournal (New-ControlContextPlan $Store $State.EndpointId)
             Save-ContourJournal $context (Get-SetupJournalPath $Package 'context-journal.json') -CreateNew
             & $Checkpoint 'context-journaled'

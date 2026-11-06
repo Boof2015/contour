@@ -72,7 +72,7 @@ ConnectionCheck AudioConnection::check(const std::wstring& id) {
         checked(render->ReleaseBuffer(frames,AUDCLNT_BUFFERFLAGS_SILENT),"Cannot submit silent audio");
     };
     fill(capacity);checked(client->Start(),"Cannot start the audio connection check");AudioStop stop{client.Get()};
-    ConnectionCheck result;const auto started=GetTickCount64();
+    ConnectionCheck result;result.streaming=true;const auto started=GetTickCount64();
     // Keep the stream available long enough for the app -> APO -> app
     // acknowledgement, including a newly created runtime's first heartbeat.
     while(!stopping_&&!suspended_&&GetTickCount64()-started<1500) {

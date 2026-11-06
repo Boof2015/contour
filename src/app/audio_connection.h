@@ -11,7 +11,7 @@
 
 namespace contour::app {
 struct ConnectionCheck {
-    bool busy=false,confirmed=false;
+    bool busy=false,confirmed=false,streaming=false;
     std::string detail;
     std::uint64_t finished=0;
 };

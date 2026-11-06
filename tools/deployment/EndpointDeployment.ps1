@@ -48,8 +48,15 @@ function Get-Binding($State,[string]$EndpointId) {
     if ($found.Count) { return $found[0] }
     return $null
 }
+function Get-DeploymentHandoff($State) {
+    if ($null -ne $State.PSObject.Properties['Handoff']) { return $State.Handoff }
+    return $null
+}
+function Assert-NoDeploymentHandoff($State) {
+    if ($null -ne (Get-DeploymentHandoff $State)) { throw 'Finish the installation handoff before changing devices or packages.' }
+}
 function Assert-DeploymentState($State) {
-    if ($State.Schema -ne 1 -or $State.Kind -cne 'ContourEndpointDeployment' -or
+    if ($State.Schema -notin @(1,2) -or $State.Kind -cne 'ContourEndpointDeployment' -or
         ($State.Revision -isnot [long] -and $State.Revision -isnot [int]) -or $State.Revision -lt 0) { throw 'Invalid deployment state.' }
     $ids=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     $packages=@{};$identities=@{}
@@ -69,6 +76,32 @@ function Assert-DeploymentState($State) {
     foreach ($binding in $State.Bindings) {
         Assert-Binding $State $binding
         if (-not $ids.Add($binding.EndpointId)) { throw 'Duplicate endpoint ownership.' }
+    }
+    $handoff=Get-DeploymentHandoff $State
+    if ($null -ne $handoff) {
+        if ($State.Schema -ne 2) { throw 'Installation handoff requires the current catalog schema.' }
+        Assert-DeploymentId $handoff.Id
+        if ($handoff.Phase -notin @('Prepared','Migrating','Returning')) { throw 'Invalid installation handoff.' }
+        Assert-Binding $State $handoff.Before
+        Assert-Binding $State $handoff.After
+        if ($handoff.Before.EndpointId -ine $handoff.After.EndpointId -or $handoff.Before.AdapterId -ine $handoff.After.AdapterId -or
+            (Get-Registration $State $handoff.Before.RegistrationId).Mode -ne 'Legacy' -or
+            (Get-Registration $State $handoff.After.RegistrationId).Mode -ne 'Component' -or
+            $handoff.OriginalSetup.Id -ine $handoff.Before.RegistrationId -or
+            $handoff.OriginalSetup.EndpointId -ine $handoff.Before.EndpointId -or
+            $handoff.OriginalSetup.Schema -ne 1 -or $handoff.OriginalSetup.Kind -cne 'ContourDeviceSetup' -or
+            $handoff.OriginalSetup.State -ne 'Attached' -or $handoff.OriginalSetup.AudioRestartPending -isnot [bool] -or
+            $handoff.OriginalSetup.AudioRestartPending) {
+            throw 'Installation handoff identities do not agree.'
+        }
+        foreach ($hash in @($handoff.AttachmentSha256,$handoff.ContextSha256)) {
+            if ($hash -cnotmatch '^[0-9A-F]{64}\z') { throw 'Invalid original journal fingerprint.' }
+        }
+        $current=Get-Binding $State $handoff.Before.EndpointId
+        if ($null -eq $current -or $current.AdapterId -ine $handoff.Before.AdapterId -or
+            $current.RegistrationId -notin @($handoff.Before.RegistrationId,$handoff.After.RegistrationId)) {
+            throw 'Installation handoff lost endpoint ownership.'
+        }
     }
     $op=$State.Operation
     if ($null -eq $op) { return }
@@ -101,6 +134,9 @@ function Assert-DeploymentState($State) {
     if (@($op.Services).Count -eq 0) { throw 'Missing original service state.' }
     foreach ($service in $op.Services) { if ($service -notmatch '^[A-Za-z0-9_.-]{1,256}\z') { throw 'Invalid service state.' } }
     foreach ($name in @('Default','User','Security')) { if ($op.Settings.$name -isnot [string]) { throw 'Invalid settings guard.' } }
+    if ($null -ne $handoff -and ($handoff.Phase -ne 'Migrating' -or $op.Id -ine $handoff.Id -or $op.Action -ne 'Migrate' -or
+        $op.EndpointId -ine $handoff.Before.EndpointId -or $op.Before.RegistrationId -ine $handoff.Before.RegistrationId -or
+        $op.After.RegistrationId -ine $handoff.After.RegistrationId)) { throw 'Transaction does not belong to this installation handoff.' }
 }
 function Read-DeploymentState([string]$Path) {
     $state=Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -120,7 +156,7 @@ function Lock-DeploymentState([string]$Path) {
 function New-EndpointDeployment([string]$Path) {
     $lease=Lock-DeploymentState $Path
     try {
-        $state=[pscustomobject]@{Schema=1;Kind='ContourEndpointDeployment';Revision=0;Registrations=@();Bindings=@();Operation=$null;LastResult=$null}
+        $state=[pscustomobject]@{Schema=2;Kind='ContourEndpointDeployment';Revision=0;Registrations=@();Bindings=@();Operation=$null;LastResult=$null;Handoff=$null}
         Save-DeploymentState $state $Path -CreateNew
     } finally { $lease.Dispose() }
 }
@@ -137,6 +173,7 @@ function Add-EndpointRegistration([string]$Path,$Registration) {
     $lease=Lock-DeploymentState $Path
     try {
         $state=Read-DeploymentState $Path
+        Assert-NoDeploymentHandoff $state
         if ($null -ne $state.Operation) { throw 'Finish endpoint recovery before changing registrations.' }
         Add-RegistrationRecord $state $Registration
         Save-DeploymentState $state $Path
@@ -174,26 +211,33 @@ function Assert-EndpointAssignments($Store,$State,[string]$EndpointId,$Binding) 
         if ($null -ne $disabled -and -not (Test-RawEqual $disabled ([pscustomobject]@{Type=4;Data='00000000'}))) { throw 'Audio enhancements are disabled or unknown.' }
     }
 }
+function Get-LegacyEndpointRecord($Store,$Attachment,$Context,[string]$AdapterId) {
+    Assert-ContourPlan $Attachment.Plan
+    Assert-ControlContextPlan $Context.Plan
+    if ($Attachment.Schema -ne 1 -or $Attachment.State -ne 'AttachedPendingGraphRebuild' -or
+        $Context.Schema -ne 1 -or $Context.State -ne 'Provisioned' -or
+        $Context.Plan.EndpointId -ine $Attachment.Plan.Endpoint.Id) { throw 'Legacy journals do not describe a provisioned endpoint.' }
+    foreach ($change in $Attachment.Plan.Changes) {
+        if (-not (Test-RawEqual ($Store.Read($change.Path,$change.Name)) $change.After)) { throw 'Legacy installation differs from its journal.' }
+    }
+    $registration=[pscustomobject]@{Id=$Attachment.Plan.Id;Mode='Legacy';AdapterId='';Packages=@(
+        [pscustomobject]@{Id=$Attachment.Plan.Id;Kind='Legacy';Identity=$Attachment.Plan.Id;Sha256=$Attachment.Plan.DllSha256})}
+    $binding=[pscustomobject]@{EndpointId=$Attachment.Plan.Endpoint.Id;AdapterId=$AdapterId;RegistrationId=$registration.Id}
+    $state=[pscustomobject]@{Registrations=@($registration)}
+    Assert-Binding $state $binding
+    Assert-EndpointAssignments $Store $state $binding.EndpointId $binding
+    [void](Get-EndpointSettings $Store $binding.EndpointId)
+    return [pscustomobject]@{Registration=$registration;Binding=$binding}
+}
 function Import-LegacyEndpoint($Store,[string]$Path,$Attachment,$Context,[string]$AdapterId) {
     $lease=Lock-DeploymentState $Path
     try {
         $state=Read-DeploymentState $Path
+        Assert-NoDeploymentHandoff $state
         if ($null -ne $state.Operation) { throw 'Finish recovery before importing an installation.' }
-        Assert-ContourPlan $Attachment.Plan
-        Assert-ControlContextPlan $Context.Plan
-        if ($Attachment.Schema -ne 1 -or $Attachment.State -ne 'AttachedPendingGraphRebuild' -or
-            $Context.Schema -ne 1 -or $Context.State -ne 'Provisioned' -or
-            $Context.Plan.EndpointId -ine $Attachment.Plan.Endpoint.Id) { throw 'Legacy journals do not describe a provisioned endpoint.' }
-        foreach ($change in $Attachment.Plan.Changes) {
-            if (-not (Test-RawEqual ($Store.Read($change.Path,$change.Name)) $change.After)) { throw 'Legacy installation differs from its journal.' }
-        }
-        $registration=[pscustomobject]@{Id=$Attachment.Plan.Id;Mode='Legacy';AdapterId='';Packages=@(
-            [pscustomobject]@{Id=$Attachment.Plan.Id;Kind='Legacy';Identity=$Attachment.Plan.Id;Sha256=$Attachment.Plan.DllSha256})}
+        $record=Get-LegacyEndpointRecord $Store $Attachment $Context $AdapterId
+        $registration=$record.Registration;$binding=$record.Binding
         Add-RegistrationRecord $state $registration
-        $binding=[pscustomobject]@{EndpointId=$Attachment.Plan.Endpoint.Id;AdapterId=$AdapterId;RegistrationId=$registration.Id}
-        Assert-Binding $state $binding
-        Assert-EndpointAssignments $Store $state $binding.EndpointId $binding
-        [void](Get-EndpointSettings $Store $binding.EndpointId)
         $current=Get-Binding $state $binding.EndpointId
         if ($null -ne $current) {
             if ($current.AdapterId -ine $AdapterId -or $current.RegistrationId -ine $registration.Id) { throw 'Endpoint already has a different owner.' }
@@ -263,7 +307,11 @@ function Undo-EndpointTransition($Store,[string]$Path,
     [Parameter(Mandatory=$true)][scriptblock]$VerifyRegistration,
     [Parameter(Mandatory=$true)][scriptblock]$VerifyApplied) {
     $lease=Lock-DeploymentState $Path
-    try { Restore-EndpointTransition $Store (Read-DeploymentState $Path) $Path $StopAudio $StartAudio $VerifyRegistration $VerifyApplied }
+    try {
+        $state=Read-DeploymentState $Path
+        Assert-NoDeploymentHandoff $state
+        Restore-EndpointTransition $Store $state $Path $StopAudio $StartAudio $VerifyRegistration $VerifyApplied
+    }
     finally { $lease.Dispose() }
 }
 function Invoke-EndpointTransition($Store,[string]$Path,[ValidateSet('Attach','Migrate','Detach')][string]$Action,
@@ -276,87 +324,101 @@ function Invoke-EndpointTransition($Store,[string]$Path,[ValidateSet('Attach','M
     [scriptblock]$Checkpoint={param($Point)}) {
     $lease=Lock-DeploymentState $Path
     try {
-        $state=Read-DeploymentState $Path
-        if ($null -ne $state.Operation) { throw 'Finish the pending endpoint recovery first.' }
-        $before=Get-Binding $state $EndpointId
-        $after=if ($Action -eq 'Detach') { $null } else { [pscustomobject]@{EndpointId=$EndpointId;AdapterId=$AdapterId;RegistrationId=$RegistrationId} }
-        if (($Action -eq 'Attach' -and $null -ne $before) -or ($Action -ne 'Attach' -and $null -eq $before)) { throw 'Endpoint ownership does not permit this action.' }
-        if ($null -ne $after) { Assert-Binding $state $after }
-        if ($null -ne $before -and $before.AdapterId -ine $AdapterId) { throw 'Endpoint adapter changed; inspect it again.' }
+        Assert-NoDeploymentHandoff (Read-DeploymentState $Path)
+        Invoke-EndpointTransitionCore @PSBoundParameters
+    } finally { $lease.Dispose() }
+}
+# Internal entry point: the coordinator must already hold the catalog lease.
+function Invoke-EndpointTransitionCore($Store,[string]$Path,[ValidateSet('Attach','Migrate','Detach')][string]$Action,
+    [string]$EndpointId,[string]$AdapterId,[string]$RegistrationId,
+    [Parameter(Mandatory=$true)][scriptblock]$VerifyRegistration,
+    [Parameter(Mandatory=$true)][scriptblock]$VerifyApplied,
+    [Parameter(Mandatory=$true)][scriptblock]$CaptureServices,
+    [Parameter(Mandatory=$true)][scriptblock]$StopAudio,
+    [Parameter(Mandatory=$true)][scriptblock]$StartAudio,
+    [scriptblock]$Checkpoint={param($Point)}) {
+    $state=Read-DeploymentState $Path
+    if ($null -ne $state.Operation) { throw 'Finish the pending endpoint recovery first.' }
+    $before=Get-Binding $state $EndpointId
+    $after=if ($Action -eq 'Detach') { $null } else { [pscustomobject]@{EndpointId=$EndpointId;AdapterId=$AdapterId;RegistrationId=$RegistrationId} }
+    if (($Action -eq 'Attach' -and $null -ne $before) -or ($Action -ne 'Attach' -and $null -eq $before)) { throw 'Endpoint ownership does not permit this action.' }
+    if ($null -ne $after) { Assert-Binding $state $after }
+    if ($null -ne $before -and $before.AdapterId -ine $AdapterId) { throw 'Endpoint adapter changed; inspect it again.' }
+    Assert-EndpointAssignments $Store $state $EndpointId $before
+    $settings=Get-EndpointSettings $Store $EndpointId
+    foreach ($binding in @($before,$after)) {
+        if ($null -ne $binding) { Confirm-EndpointCheck $VerifyRegistration $state $binding $EndpointId }
+    }
+    $services=@(& $CaptureServices)
+    $operation=[pscustomobject]@{Id=([guid]::NewGuid().ToString('D'));EndpointId=$EndpointId;Action=$Action;
+        Before=$before;After=$after;Phase='Prepared';Intents=@();Settings=$settings;
+        Services=$services;AudioRestartPending=$true;Error='';Conflicts=@()}
+    $handoff=Get-DeploymentHandoff $state
+    if ($null -ne $handoff) { $operation.Id=$handoff.Id }
+    $state.Operation=$operation
+    Save-DeploymentState $state $Path
+    $audioNeedsRestart=$false
+    try {
+        $null=& $Checkpoint 'prepared'
+        $audioNeedsRestart=$true
+        $null=& $StopAudio $services
+        $null=& $Checkpoint 'audio-stopped'
         Assert-EndpointAssignments $Store $state $EndpointId $before
-        $settings=Get-EndpointSettings $Store $EndpointId
+        Assert-SettingsUnchanged $Store $operation
         foreach ($binding in @($before,$after)) {
             if ($null -ne $binding) { Confirm-EndpointCheck $VerifyRegistration $state $binding $EndpointId }
         }
-        $services=@(& $CaptureServices)
-        $operation=[pscustomobject]@{Id=([guid]::NewGuid().ToString('D'));EndpointId=$EndpointId;Action=$Action;
-            Before=$before;After=$after;Phase='Prepared';Intents=@();Settings=$settings;
-            Services=$services;AudioRestartPending=$true;Error='';Conflicts=@()}
-        $state.Operation=$operation
-        Save-DeploymentState $state $Path
+        $operation.Phase='Writing';Save-DeploymentState $state $Path
+        $fx=(Get-EndpointPath $EndpointId)+'\FxProperties'
+        for ($i=0;$i -lt 2;++$i) {
+            $name=$script:EffectPrefix+($i+1)
+            $old=Get-BindingValue $state $before $i;$new=Get-BindingValue $state $after $i
+            $operation.Intents+=@($i);Save-DeploymentState $state $Path
+            $null=& $Checkpoint ('intent-'+$i)
+            if (-not (Test-RawEqual ($Store.Read($fx,$name)) $old)) { throw 'Endpoint changed before write.' }
+            if ($null -eq $new) { $Store.DeleteValue($fx,$name) } else { $Store.Write($fx,$name,$new.Type,$new.Data) }
+            if (-not (Test-RawEqual ($Store.Read($fx,$name)) $new)) { throw 'Endpoint write did not persist.' }
+            $null=& $Checkpoint ('written-'+$i)
+        }
+        $operation.Phase='Verifying';Save-DeploymentState $state $Path
+        $null=& $Checkpoint 'verification-pending'
+        $null=& $StartAudio $services
         $audioNeedsRestart=$false
-        try {
-            $null=& $Checkpoint 'prepared'
+        $operation.AudioRestartPending=$false;Save-DeploymentState $state $Path
+        $null=& $Checkpoint 'audio-restarted'
+        Confirm-EndpointCheck $VerifyApplied $state $after $EndpointId
+        $null=& $Checkpoint 'verified'
+        Assert-EndpointAssignments $Store $state $EndpointId $after
+        Assert-SettingsUnchanged $Store $operation
+        $state.Bindings=@($state.Bindings | Where-Object { $_.EndpointId -ine $EndpointId })
+        if ($null -ne $after) { $state.Bindings+=@($after) }
+        $state.LastResult=[pscustomobject]@{Id=$operation.Id;EndpointId=$EndpointId;Action=$Action;Outcome='Committed';Error=''}
+        $state.Operation=$null;Save-DeploymentState $state $Path
+        $null=& $Checkpoint 'committed'
+    } catch {
+        $failure=$_
+        # Reload the durable record, including after ambiguous file-write
+        # failures. A committed transaction must never be undone as if it
+        # were still pending, and no in-memory mutation grants ownership.
+        $current=Read-DeploymentState $Path
+        if ($null -ne $current.Operation) {
+            $current.Operation.Error=$failure.Exception.Message
+            Save-DeploymentState $current $Path
             $audioNeedsRestart=$true
-            $null=& $StopAudio $services
-            $null=& $Checkpoint 'audio-stopped'
-            Assert-EndpointAssignments $Store $state $EndpointId $before
-            Assert-SettingsUnchanged $Store $operation
-            foreach ($binding in @($before,$after)) {
-                if ($null -ne $binding) { Confirm-EndpointCheck $VerifyRegistration $state $binding $EndpointId }
-            }
-            $operation.Phase='Writing';Save-DeploymentState $state $Path
-            $fx=(Get-EndpointPath $EndpointId)+'\FxProperties'
-            for ($i=0;$i -lt 2;++$i) {
-                $name=$script:EffectPrefix+($i+1)
-                $old=Get-BindingValue $state $before $i;$new=Get-BindingValue $state $after $i
-                $operation.Intents+=@($i);Save-DeploymentState $state $Path
-                $null=& $Checkpoint ('intent-'+$i)
-                if (-not (Test-RawEqual ($Store.Read($fx,$name)) $old)) { throw 'Endpoint changed before write.' }
-                if ($null -eq $new) { $Store.DeleteValue($fx,$name) } else { $Store.Write($fx,$name,$new.Type,$new.Data) }
-                if (-not (Test-RawEqual ($Store.Read($fx,$name)) $new)) { throw 'Endpoint write did not persist.' }
-                $null=& $Checkpoint ('written-'+$i)
-            }
-            $operation.Phase='Verifying';Save-DeploymentState $state $Path
-            $null=& $Checkpoint 'verification-pending'
-            $null=& $StartAudio $services
-            $audioNeedsRestart=$false
-            $operation.AudioRestartPending=$false;Save-DeploymentState $state $Path
-            $null=& $Checkpoint 'audio-restarted'
-            Confirm-EndpointCheck $VerifyApplied $state $after $EndpointId
-            $null=& $Checkpoint 'verified'
-            Assert-EndpointAssignments $Store $state $EndpointId $after
-            Assert-SettingsUnchanged $Store $operation
-            $state.Bindings=@($state.Bindings | Where-Object { $_.EndpointId -ine $EndpointId })
-            if ($null -ne $after) { $state.Bindings+=@($after) }
-            $state.LastResult=[pscustomobject]@{Id=$operation.Id;EndpointId=$EndpointId;Action=$Action;Outcome='Committed';Error=''}
-            $state.Operation=$null;Save-DeploymentState $state $Path
-            $null=& $Checkpoint 'committed'
-        } catch {
-            $failure=$_
-            # Reload the durable record, including after ambiguous file-write
-            # failures. A committed transaction must never be undone as if it
-            # were still pending, and no in-memory mutation grants ownership.
-            $current=Read-DeploymentState $Path
-            if ($null -ne $current.Operation) {
-                $current.Operation.Error=$failure.Exception.Message
-                Save-DeploymentState $current $Path
-                $audioNeedsRestart=$true
-                if (Restore-EndpointTransition $Store $current $Path $StopAudio $StartAudio $VerifyRegistration $VerifyApplied) {
-                    $audioNeedsRestart=$false
-                }
-            }
-            throw $failure
-        } finally {
-            # Journal I/O failure must not skip service recovery. Keep the last
-            # durable intent for the next run; never guess ownership to repair
-            # assignments when the journal cannot be read or saved.
-            if ($audioNeedsRestart) {
-                try { $null=& $StartAudio $services }
-                catch { Write-Warning ('Audio restart retry failed: '+$_.Exception.Message) }
+            if (Restore-EndpointTransition $Store $current $Path $StopAudio $StartAudio $VerifyRegistration $VerifyApplied) {
+                $audioNeedsRestart=$false
             }
         }
-    } finally { $lease.Dispose() }
+        throw $failure
+    } finally {
+        # Journal I/O failure must not skip service recovery. Keep the last
+        # durable intent for the next run; never guess ownership to repair
+        # assignments when the journal cannot be read or saved.
+        if ($audioNeedsRestart) {
+            try { $null=& $StartAudio $services }
+            catch { Write-Warning ('Audio restart retry failed: '+$_.Exception.Message) }
+        }
+    }
 }
 function Get-DeploymentPackageUsage($State) {
     Assert-DeploymentState $State
@@ -373,6 +435,12 @@ function Get-DeploymentPackageUsage($State) {
     if ($null -ne $State.Operation) {
         foreach ($side in @('Before','After')) {
             if ($null -ne $State.Operation.$side) { $pins+=@([pscustomobject]@{Binding=$State.Operation.$side;Reason=('Pending'+$side)}) }
+        }
+    }
+    $handoff=Get-DeploymentHandoff $State
+    if ($null -ne $handoff) {
+        foreach ($side in @('Before','After')) {
+            $pins+=@([pscustomobject]@{Binding=$handoff.$side;Reason=('Handoff'+$side)})
         }
     }
     foreach ($pin in $pins) {

@@ -286,8 +286,18 @@ namespace Contour.Deployment {
                     stream.Write(bytes, 0, bytes.Length);
                     stream.Flush(true);
                 }
-                if (!MoveFileEx(next, path, createNew ? 8 : 9))
-                    throw new Win32Exception(Marshal.GetLastWin32Error());
+                for (int attempt = 0; ; ++attempt) {
+                    if (MoveFileEx(next, path, createNew ? 8 : 9)) break;
+                    int error = Marshal.GetLastWin32Error();
+                    // Readers and filesystem filters can briefly deny the
+                    // rename. Retry only lock/access failures, using the same
+                    // flushed file; never delete the destination to get past it.
+                    if (attempt < 5 && (error == 5 || error == 32 || error == 33)) {
+                        System.Threading.Thread.Sleep(20 << attempt);
+                        continue;
+                    }
+                    throw new Win32Exception(error, "Cannot save journal '" + path + "': " + new Win32Exception(error).Message);
+                }
             } finally { if (File.Exists(next)) File.Delete(next); }
         }
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]

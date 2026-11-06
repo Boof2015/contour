@@ -108,6 +108,9 @@ try {
         $journal = $document
         Assert-ContourPlan $journal.Plan
         if ($File -ine (Join-Path $journal.Plan.Package 'journal.json')) { throw 'Use the protected package journal for restoration.' }
+        if (Test-Path -LiteralPath (Join-Path $journal.Plan.Package 'device-setup.json')) {
+            throw 'This installation is managed by Contour. Use its device settings instead of the standalone lab restorer.'
+        }
         $restored = Invoke-ContourRestore $store $journal $File
         Write-Output "Journal state: $($journal.State)"
         if (-not $restored) { $journal.Conflicts | Write-Output; exit 1 }

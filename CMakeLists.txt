@@ -140,6 +140,11 @@ if(BUILD_TESTING)
         -BinaryDirectory $<TARGET_FILE_DIR:contour-apo>
         -WorkDirectory "${CMAKE_BINARY_DIR}/endpoint-deployment-tests")
     set_tests_properties(endpoint-deployment PROPERTIES TIMEOUT 180)
+    add_test(NAME shared-device-setup COMMAND powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/shared_setup_tests.ps1"
+        -BinaryDirectory $<TARGET_FILE_DIR:contour-apo>
+        -WorkDirectory "${CMAKE_BINARY_DIR}/shared-setup-tests")
+    set_tests_properties(shared-device-setup PROPERTIES TIMEOUT 180)
 
     add_executable(contour-dsp-tests tests/dsp_tests.cpp)
     contour_target(contour-dsp-tests)
