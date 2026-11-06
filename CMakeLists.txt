@@ -164,3 +164,8 @@ if(BUILD_TESTING)
         -WorkDirectory "${CMAKE_BINARY_DIR}/control-context-tests")
     set_tests_properties(control-context-recovery PROPERTIES TIMEOUT 90)
 endif()
+
+option(CONTOUR_BUILD_APP "Build the Contour desktop editor (WebView2)" ON)
+if(CONTOUR_BUILD_APP)
+    add_subdirectory(src/app)
+endif()

@@ -307,6 +307,13 @@ void test_import() {
         "Filter: ON NO Fc 60Hz Q 30\nFilter: ON AP Fc 300Hz Q 1\nFilter: ON BP Fc 200Hz Q 2\n"
         "Filter: ON LSC Fc 40Hz Gain 4dB Q .7\n");
     require(other.layer && other.layer->filters.size() == 6, "supported type import");
+    const auto repeated_slots = import_peq_text(
+        "Filter Settings file\nRoom EQ V5.31.3\nEqualiser: Generic\n"
+        "Filter 1: ON PK Fc 57.00 Hz Gain -10.30 dB Q 7.493\n"
+        "Filter 2: ON PK Fc 125.0 Hz Gain -18.60 dB Q 5.918\n"
+        "Filter 3: ON None\nFilter 1: ON None\nFilter 2: ON None\n");
+    require(repeated_slots.layer && repeated_slots.layer->filters.size() == 2,
+        "REW's repeated unused slot numbers rejected or imported as filters");
 }
 
 void test_import_errors() {
@@ -314,7 +321,7 @@ void test_import_errors() {
     for (const std::string bad : {"Filter 2: ON PK Fc 60 Hz Gain NaNdB Q 2", "Filter 2: ON PK Fc 60Hz Gain 2dB",
         "Filter 2: ON PK Fc 60Hz Gain 2dB Q 0", "Filter 2: OFF FUTURE Fc 60Hz Gain 2dB Q 1",
         "Filter 2: ON LS 12dB Fc 100Hz Gain 4dB", "Filter 2: ON PK Fc 60Hz Gain 2dB BW Oct 1",
-        "Filter 2: ON HP Fc 60Hz Gain 2dB Q 1", "Filter 1: ON None", "Channel: L", "Include: other.txt",
+        "Filter 2: ON HP Fc 60Hz Gain 2dB Q 1", "Filter 1: OFF PK Fc 80Hz Gain 2dB Q 1", "Channel: L", "Include: other.txt",
         "GraphicEQ: 20 0; 100 3", "Equaliser: FBQ2496", "Preamp: -1dB", "random unrecognised text"}) {
         const auto result = import_peq_text(good+bad);
         require(!result.layer && !result.issues.empty(), "bad import retained partial layer");

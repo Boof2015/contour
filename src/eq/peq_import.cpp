@@ -76,6 +76,10 @@ ImportResult import_peq_text(std::string_view text) {
             if (std::regex_match(line, match, filter_line)) {
                 seen_filter = true;
                 if (++filter_rows > max_filters_per_layer) { throw std::invalid_argument("Too many filter rows (maximum 64)"); }
+                const auto body = match[3].str();
+                // REW Generic exports can append unused slots numbered 1 and 2
+                // again. They describe no filter and do not reserve a number.
+                if (upper(body) == "NONE") { continue; }
                 if (match[1].matched) {
                     const double id = number(match[1].str());
                     if (id < 1 || id > 1000000 || !ids.insert(static_cast<unsigned>(id)).second) {
@@ -83,8 +87,6 @@ ImportResult import_peq_text(std::string_view text) {
                     }
                 }
                 const bool enabled = upper(match[2].str()) == "ON";
-                const auto body = match[3].str();
-                if (upper(body) == "NONE") { continue; } // REW unused slot.
                 std::smatch fields;
                 if (!std::regex_match(body, fields, parameters)) {
                     throw std::invalid_argument("Unsupported or malformed filter; expected type, Fc/Hz, Gain/dB if applicable, and Q. Corner/slope shelves and BW are not supported");

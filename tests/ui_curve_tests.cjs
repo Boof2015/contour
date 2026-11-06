@@ -1,0 +1,36 @@
+// Compare the display-only fast path with coefficients produced by the actual
+// C++ DSP compiler, across every filter type and several real device rates.
+const fs=require('node:fs'),vm=require('node:vm'),path=require('node:path'),assert=require('node:assert/strict');
+const {execFileSync}=require('node:child_process');
+const context=vm.createContext({});
+vm.runInContext(fs.readFileSync(path.join(process.argv[2],'editor.js'),'utf8'),context);
+const evaluate=s=>vm.runInContext(s,context);
+const fixtures=JSON.parse(execFileSync(process.argv[3],['--curve-fixtures'],{maxBuffer:8*1024*1024,encoding:'utf8'}));
+let checked=0;
+for(const {rate,filter} of fixtures){
+  if(filter.coefficients===null)continue; // Native validation rejects this extreme combination.
+  context.filter=filter;context.rate=rate;
+  const actual=JSON.parse(JSON.stringify(evaluate('designCurve(filter,rate)')));
+  assert.equal(actual.length,filter.coefficients.length);
+  actual.forEach((section,i)=>section.forEach((v,j)=>assert.ok(Math.abs(v-filter.coefficients[i][j])<5e-13*Math.max(1,Math.abs(v)),JSON.stringify({rate,filter,i,j,v}))));
+  checked++;
+}
+assert.ok(checked>3000);
+evaluate(`
+  const profile={work:{bypass:false}},P=()=>profile;
+  const f=F('PK',1000,6,2),left=Ly('Left',false,1,-10,true,[f]),right=Ly('Right',false,2,-20,true,[F('PK',1000,-3,2)]);
+  const sample={n:1,f:[1000],c1:[Math.cos(2*Math.PI*1000/FS)],s1:[Math.sin(2*Math.PI*1000/FS)],c2:[Math.cos(4*Math.PI*1000/FS)],s2:[Math.sin(4*Math.PI*1000/FS)]};
+  f.coefficients=designCurve(f,FS);rememberCurves({layers:[left]},FS);
+`);
+const near=(actual,expected)=>assert.ok(Math.abs(actual-expected)<1e-8,`${actual} != ${expected}`);
+near(evaluate('resp(left.filters,sample)[0]'),6);
+near(evaluate('output([left,right],0,sample)[0]'),6);
+near(evaluate('output([left,right],1,sample)[0]'),-3);
+evaluate('f.gain=9;'); // No host reply: all curves must already reflect the edit.
+near(evaluate('one(f,sample)[0]'),9);
+near(evaluate('resp(left.filters,sample)[0]'),9);
+near(evaluate('output([left,right],0,sample)[0]'),9);
+evaluate('left.gain=-80;');near(evaluate('output([left,right],0,sample)[0]'),9);
+evaluate('left.on=false;');near(evaluate('output([left,right],0,sample)[0]'),0);
+evaluate('profile.work.bypass=true;');near(evaluate('output([left,right],1,sample)[0]'),0);
+console.log(`PASS ${checked} native/JS coefficient cases; synchronous edited curves; gain-independent channel sums and bypass`);
