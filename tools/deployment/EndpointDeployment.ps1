@@ -1,5 +1,5 @@
 # Transaction core for shared registrations and independently owned endpoints.
-# Not exposed by contour-setup yet. The elevated host must validate protected
+# Used by contour-setup. The elevated host must validate protected
 # state/package paths and supply fresh registration/engine checks. Tests supply
 # an isolated registry root and fake service callbacks; no callback defaults to
 # successful verification. Package removal is deliberately a separate operation.
@@ -38,6 +38,11 @@ function Assert-Binding($State,$Binding) {
     [void](Get-EndpointPath $Binding.EndpointId)
     Assert-AdapterId $Binding.AdapterId
     $registration=Get-Registration $State $Binding.RegistrationId
+    $placement=Get-BindingPlacement $Binding
+    if ($null -ne $placement) {
+        if ($State.Schema -ne 3 -or $registration.Mode -ne 'Legacy') { throw 'Composite placement requires a current global-registration catalog.' }
+        Assert-CompositePlacement $placement
+    }
     if ($registration.Mode -eq 'Component' -and $registration.AdapterId -ine $Binding.AdapterId) {
         throw 'Device-scoped registration belongs to another adapter.'
     }
@@ -56,7 +61,7 @@ function Assert-NoDeploymentHandoff($State) {
     if ($null -ne (Get-DeploymentHandoff $State)) { throw 'Finish the installation handoff before changing devices or packages.' }
 }
 function Assert-DeploymentState($State) {
-    if ($State.Schema -notin @(1,2) -or $State.Kind -cne 'ContourEndpointDeployment' -or
+    if ($State.Schema -notin @(1,2,3) -or $State.Kind -cne 'ContourEndpointDeployment' -or
         ($State.Revision -isnot [long] -and $State.Revision -isnot [int]) -or $State.Revision -lt 0) { throw 'Invalid deployment state.' }
     $ids=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     $packages=@{};$identities=@{}
@@ -127,7 +132,10 @@ function Assert-DeploymentState($State) {
         ($null -ne $current -and ($current.RegistrationId -ine $op.Before.RegistrationId -or $current.AdapterId -ine $op.Before.AdapterId))) {
         throw 'Transaction no longer matches endpoint ownership.'
     }
-    if ((@($op.Intents) -join ',') -notin @('','0','0,1') -or $op.AudioRestartPending -isnot [bool]) { throw 'Invalid recovery intent.' }
+    if (((Get-BindingPlacement $current | ConvertTo-Json -Depth 10 -Compress)) -cne
+        ((Get-BindingPlacement $op.Before | ConvertTo-Json -Depth 10 -Compress))) { throw 'Transaction placement no longer matches endpoint ownership.' }
+    $allowedIntents=if ($null -ne (Get-TransitionPlacement $op.Before $op.After)) { @('','0') } else { @('','0','0,1') }
+    if ((@($op.Intents) -join ',') -notin $allowedIntents -or $op.AudioRestartPending -isnot [bool]) { throw 'Invalid recovery intent.' }
     foreach ($intent in $op.Intents) {
         if ($intent -isnot [int] -and $intent -isnot [long]) { throw 'Recovery indices must be integers.' }
     }
@@ -192,18 +200,44 @@ function Get-BindingValue($State,$Binding,[int]$Index) {
     $classes=if ($registration.Mode -eq 'Legacy') { $script:ClassIds } else { $script:ComponentClassIds }
     [pscustomobject]@{Type=1;Data=(ConvertTo-HexString $classes[$Index])}
 }
-function Assert-EndpointAssignments($Store,$State,[string]$EndpointId,$Binding) {
+function Get-TransitionPlacement($Before,$After) {
+    $placement=Get-BindingPlacement $After
+    if ($null -eq $placement) { $placement=Get-BindingPlacement $Before }
+    if ($null -ne $placement -and $null -ne $Before -and $null -ne $After) { throw 'Composite registration migration is not supported.' }
+    return $placement
+}
+function Get-EndpointChanges($State,$Before,$After) {
+    $placement=Get-TransitionPlacement $Before $After
+    if ($null -ne $placement) {
+        $original=$placement.Guards[2].Value
+        $attached=Add-CompositeClass $original $script:ClassIds[1]
+        [pscustomobject]@{Name=($script:EffectPrefix+'15');Before=$(if ($null -eq $Before) { $original } else { $attached });
+            After=$(if ($null -eq $After) { $original } else { $attached })}
+    } else {
+        for ($i=0;$i -lt 2;++$i) {
+            [pscustomobject]@{Name=($script:EffectPrefix+($i+1));Before=(Get-BindingValue $State $Before $i);After=(Get-BindingValue $State $After $i)}
+        }
+    }
+}
+function Assert-EndpointAssignments($Store,$State,[string]$EndpointId,$Binding,$Placement=$null) {
     $fx=(Get-EndpointPath $EndpointId)+'\FxProperties'
-    for ($i=0;$i -lt 2;++$i) {
+    $ownedPlacement=Get-BindingPlacement $Binding
+    if ($null -ne $ownedPlacement) { $Placement=$ownedPlacement }
+    if ($null -ne $Placement) {
+        $cls=if ($null -ne $Binding) { $script:ClassIds[1] } else { '' }
+        Assert-CompositeAssignments $Store $EndpointId $Placement $cls
+    } else {
+      for ($i=0;$i -lt 2;++$i) {
         if (-not (Test-RawEqual ($Store.Read($fx,$script:EffectPrefix+($i+1))) (Get-BindingValue $State $Binding $i))) {
             throw 'Endpoint effect ownership changed.'
         }
     }
-    foreach ($entry in $Store.Entries($fx)) {
+      foreach ($entry in $Store.Entries($fx)) {
         if ($entry.Name -match '^\{d04e05a6-594b-4fb6-a80d-01af5eed7d1d\},(1|2|[5-9]|1[0-9]|20)$' -and
             ($entry.Path -ine $fx -or $entry.Name -notin @(($script:EffectPrefix+'1'),($script:EffectPrefix+'2')))) {
-            throw 'Other effect assignments require a coexistence strategy.'
+            Throw-EffectCompatibility
         }
+      }
     }
     foreach ($path in @($fx,((Get-EndpointPath $EndpointId)+'\Properties'))) {
         if (-not $Store.Exists($path)) { throw 'Endpoint property store is absent.' }
@@ -223,7 +257,8 @@ function Get-LegacyEndpointRecord($Store,$Attachment,$Context,[string]$AdapterId
     $registration=[pscustomobject]@{Id=$Attachment.Plan.Id;Mode='Legacy';AdapterId='';Packages=@(
         [pscustomobject]@{Id=$Attachment.Plan.Id;Kind='Legacy';Identity=$Attachment.Plan.Id;Sha256=$Attachment.Plan.DllSha256})}
     $binding=[pscustomobject]@{EndpointId=$Attachment.Plan.Endpoint.Id;AdapterId=$AdapterId;RegistrationId=$registration.Id}
-    $state=[pscustomobject]@{Registrations=@($registration)}
+    if ($Attachment.Plan.Schema -eq 2) { $binding | Add-Member NoteProperty Placement $Attachment.Plan.Placement }
+    $state=[pscustomobject]@{Schema=3;Registrations=@($registration)}
     Assert-Binding $state $binding
     Assert-EndpointAssignments $Store $state $binding.EndpointId $binding
     [void](Get-EndpointSettings $Store $binding.EndpointId)
@@ -238,6 +273,7 @@ function Import-LegacyEndpoint($Store,[string]$Path,$Attachment,$Context,[string
         $record=Get-LegacyEndpointRecord $Store $Attachment $Context $AdapterId
         $registration=$record.Registration;$binding=$record.Binding
         Add-RegistrationRecord $state $registration
+        if ($null -ne (Get-BindingPlacement $binding)) { $state.Schema=3 }
         $current=Get-Binding $state $binding.EndpointId
         if ($null -ne $current) {
             if ($current.AdapterId -ine $AdapterId -or $current.RegistrationId -ine $registration.Id) { throw 'Endpoint already has a different owner.' }
@@ -270,10 +306,11 @@ function Restore-EndpointTransition($Store,$State,[string]$Path,[scriptblock]$St
         $null=& $StopAudio $op.Services
         if ($null -ne $op.Before) { Confirm-EndpointCheck $VerifyRegistration $State $op.Before $op.EndpointId }
         $fx=(Get-EndpointPath $op.EndpointId)+'\FxProperties'
+        $changes=@(Get-EndpointChanges $State $op.Before $op.After)
         foreach ($i in @($op.Intents | Sort-Object -Descending)) {
-            $name=$script:EffectPrefix+($i+1)
-            $before=Get-BindingValue $State $op.Before $i
-            $after=Get-BindingValue $State $op.After $i
+            $name=$changes[$i].Name
+            $before=$changes[$i].Before
+            $after=$changes[$i].After
             $current=$Store.Read($fx,$name)
             if (Test-RawEqual $current $before) { continue }
             if (-not (Test-RawEqual $current $after)) { $op.Conflicts+=@('Foreign effect assignment retained: '+$name);continue }
@@ -286,7 +323,7 @@ function Restore-EndpointTransition($Store,$State,[string]$Path,[scriptblock]$St
         }
         # Check even slots with no write intent: a foreign change may have
         # caused failure before our first write. Keep both registrations pinned.
-        Assert-EndpointAssignments $Store $State $op.EndpointId $op.Before
+        Assert-EndpointAssignments $Store $State $op.EndpointId $op.Before (Get-TransitionPlacement $op.Before $op.After)
     } catch { $op.Conflicts+=@($_.Exception.Message) }
     try {
         $null=& $StartAudio $op.Services; $op.AudioRestartPending=$false
@@ -342,9 +379,14 @@ function Invoke-EndpointTransitionCore($Store,[string]$Path,[ValidateSet('Attach
     $before=Get-Binding $state $EndpointId
     $after=if ($Action -eq 'Detach') { $null } else { [pscustomobject]@{EndpointId=$EndpointId;AdapterId=$AdapterId;RegistrationId=$RegistrationId} }
     if (($Action -eq 'Attach' -and $null -ne $before) -or ($Action -ne 'Attach' -and $null -eq $before)) { throw 'Endpoint ownership does not permit this action.' }
+    if ($Action -eq 'Attach') {
+        $available=Get-AvailableEffectPlacement $Store $EndpointId
+        if ($null -ne $available) { $state.Schema=3;$after | Add-Member NoteProperty Placement $available }
+    }
+    $placement=Get-TransitionPlacement $before $after
     if ($null -ne $after) { Assert-Binding $state $after }
     if ($null -ne $before -and $before.AdapterId -ine $AdapterId) { throw 'Endpoint adapter changed; inspect it again.' }
-    Assert-EndpointAssignments $Store $state $EndpointId $before
+    Assert-EndpointAssignments $Store $state $EndpointId $before $placement
     $settings=Get-EndpointSettings $Store $EndpointId
     foreach ($binding in @($before,$after)) {
         if ($null -ne $binding) { Confirm-EndpointCheck $VerifyRegistration $state $binding $EndpointId }
@@ -363,16 +405,17 @@ function Invoke-EndpointTransitionCore($Store,[string]$Path,[ValidateSet('Attach
         $audioNeedsRestart=$true
         $null=& $StopAudio $services
         $null=& $Checkpoint 'audio-stopped'
-        Assert-EndpointAssignments $Store $state $EndpointId $before
+        Assert-EndpointAssignments $Store $state $EndpointId $before $placement
         Assert-SettingsUnchanged $Store $operation
         foreach ($binding in @($before,$after)) {
             if ($null -ne $binding) { Confirm-EndpointCheck $VerifyRegistration $state $binding $EndpointId }
         }
         $operation.Phase='Writing';Save-DeploymentState $state $Path
         $fx=(Get-EndpointPath $EndpointId)+'\FxProperties'
-        for ($i=0;$i -lt 2;++$i) {
-            $name=$script:EffectPrefix+($i+1)
-            $old=Get-BindingValue $state $before $i;$new=Get-BindingValue $state $after $i
+        $changes=@(Get-EndpointChanges $state $before $after)
+        for ($i=0;$i -lt $changes.Count;++$i) {
+            $name=$changes[$i].Name
+            $old=$changes[$i].Before;$new=$changes[$i].After
             $operation.Intents+=@($i);Save-DeploymentState $state $Path
             $null=& $Checkpoint ('intent-'+$i)
             if (-not (Test-RawEqual ($Store.Read($fx,$name)) $old)) { throw 'Endpoint changed before write.' }
@@ -388,7 +431,7 @@ function Invoke-EndpointTransitionCore($Store,[string]$Path,[ValidateSet('Attach
         $null=& $Checkpoint 'audio-restarted'
         Confirm-EndpointCheck $VerifyApplied $state $after $EndpointId
         $null=& $Checkpoint 'verified'
-        Assert-EndpointAssignments $Store $state $EndpointId $after
+        Assert-EndpointAssignments $Store $state $EndpointId $after $placement
         Assert-SettingsUnchanged $Store $operation
         $state.Bindings=@($state.Bindings | Where-Object { $_.EndpointId -ine $EndpointId })
         if ($null -ne $after) { $state.Bindings+=@($after) }

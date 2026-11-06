@@ -102,7 +102,7 @@ function Invoke-SetupRecovery($Store, $State, [string] $Package) {
 }
 function Invoke-DeviceSetup($Store, $State, [string] $Package, [string] $Action,
     [scriptblock] $CaptureServices, [scriptblock] $StopAudio, [scriptblock] $StartAudio,
-    [scriptblock] $Checkpoint={param($Point)}) {
+    [scriptblock] $Checkpoint={param($Point)}, [scriptblock] $VerifyInstalled=$null) {
     if ($Action -notin @('Install','Remove')) { throw 'Unknown device setup operation.' }
     Assert-LegacySetupAuthority $State $Package
     $attachment=Read-SetupJson (Get-SetupJournalPath $Package 'journal.json')
@@ -134,6 +134,11 @@ function Invoke-DeviceSetup($Store, $State, [string] $Package, [string] $Action,
             $context.SavedProfileCleanup=$true
             Save-ContourJournal $context (Get-SetupJournalPath $Package 'context-journal.json')
             & $Checkpoint 'context-ready'
+            if ($null -ne $VerifyInstalled) {
+                & $StartAudio $State.Services
+                $verified=& $VerifyInstalled $State.EndpointId
+                if ($verified -isnot [bool] -or -not $verified) { throw 'Contour did not respond after installation. The original device effects will be restored.' }
+            }
             $State.State='Attached'
         } else {
             Invoke-SetupRecovery $Store $State $Package

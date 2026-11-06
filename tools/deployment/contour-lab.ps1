@@ -139,7 +139,7 @@ try {
     foreach ($name in @('contour-apo-host.exe','contour-deploy-info.exe')) {
         Copy-Item -LiteralPath (Join-Path $sourceDirectory $name) -Destination (Join-Path $plan.Package $name)
     }
-    foreach ($name in @('contour-lab.ps1','Deployment.ps1','RegistryStore.cs')) {
+    foreach ($name in @('contour-lab.ps1','Deployment.ps1','EffectPlacement.ps1','RegistryStore.cs')) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $plan.Package $name)
     }
     if ((Get-FileHash -LiteralPath $plan.TargetDll -Algorithm SHA256).Hash -cne $plan.DllSha256) { throw 'Staged DLL hash mismatch.' }

@@ -75,6 +75,7 @@ function ConvertTo-SharedSetup($Store,[string]$Package,[string]$AdapterId,[scrip
             throw 'Another endpoint owns this prepared catalog.'
         }
         Add-RegistrationRecord $catalog $legacy.Registration
+        if ($null -ne (Get-BindingPlacement $legacy.Binding)) { $catalog.Schema=3 }
         $catalog.Bindings=@($legacy.Binding)
         Save-DeploymentState $catalog $path
         $null=& $Checkpoint 'shared-catalog-ready'
@@ -164,7 +165,8 @@ function Invoke-SharedDeviceSetup($Store,[string]$Package,[ValidateSet('Install'
         $binding=Get-Binding $catalog $EndpointId
         if ($Action -eq 'Install') {
             if ($null -ne $binding) { throw 'Contour is already installed on this device.' }
-            Assert-EndpointAssignments $Store $catalog $EndpointId $null
+            $placement=Get-AvailableEffectPlacement $Store $EndpointId
+            Assert-EndpointAssignments $Store $catalog $EndpointId $null $placement
             Prepare-SharedContext $Store $record $Package $EndpointId $Name $AdapterId $Checkpoint
             Enable-UnsignedAudio $Store (Join-Path $Package 'audio-policy.json') $Checkpoint
             Invoke-EndpointTransitionCore $Store $path Attach $EndpointId $AdapterId $record.Id `
@@ -175,7 +177,10 @@ function Invoke-SharedDeviceSetup($Store,[string]$Package,[ValidateSet('Install'
                 Invoke-EndpointTransitionCore $Store $path Detach $EndpointId $binding.AdapterId '' `
                     -VerifyRegistration $VerifyRegistration -VerifyApplied $VerifyApplied -CaptureServices $CaptureServices `
                     -StopAudio $StopAudio -StartAudio $StartAudio -Checkpoint $Checkpoint
-            } else { Assert-EndpointAssignments $Store $catalog $EndpointId $null }
+            } else {
+                $placement=Get-AvailableEffectPlacement $Store $EndpointId
+                Assert-EndpointAssignments $Store $catalog $EndpointId $null $placement
+            }
             Recover-SharedContext $Store $record $Package $EndpointId
             Preserve-UnsignedAudio (Join-Path $Package 'audio-policy.json')
         }

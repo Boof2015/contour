@@ -65,8 +65,8 @@ document.addEventListener('keydown', e => {
     }
   }
   const mod = e.ctrlKey || e.metaKey;
-  if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); el.blur?.(); endGesture(); if (P()) command('save'); return; }
-  if (typing || S.view !== 'editor') return;
+  if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); if(!editorGate()){el.blur?.(); endGesture(); if (P()) command('save');} return; }
+  if (typing || S.view !== 'editor' || editorGate()) return;
   if(el.matches?.('[data-type]')&&(e.key==='ArrowDown'||e.key==='ArrowUp')){e.preventDefault();openFilterType(+el.dataset.type);return;}
   if(e.key==='Delete'&&!mod&&!e.altKey&&!e.shiftKey&&!e.repeat&&!S.pop&&!drag&&(el===document.body||el.closest?.('.main'))){e.preventDefault();removeFilter();return;}
   if (mod && e.key.toLowerCase() === 'z' && !e.shiftKey) { e.preventDefault(); undo(); return; }

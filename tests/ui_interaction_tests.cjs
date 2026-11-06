@@ -12,13 +12,23 @@ const fixture=()=>{
   state.profiles=[{id:'test-profile',name:'Test profile',channels:2}];
   state.eqEnabled=true;state.masterIssues=[];state.devices[0].available=true;
   state.devices.push({id:'test-second',name:'Second test device',channels:2,rate:48000,mask:3,available:true},{id:'test-disconnected',name:'Disconnected test device',channels:0,rate:0,mask:0,available:false,state:8});
+  const installed=new Set(['test-output']);
+  if(new URL(location.href).searchParams.has('uninstalled')){
+    installed.delete('test-output');state.editor=null;state.status={endpoint:'unavailable'};
+    state.devices[0].name='Speakers (Steam Streaming Speakers)';
+  }
   let receive;window.testEdits=[];window.testRequests=[];window.testState=state;
   window.chrome.webview={addEventListener:(_,fn)=>receive=fn,postMessage:body=>{
     const r=JSON.parse(body);window.testRequests.push(r);let data=state;
     if(r.op==='window')data={custom:false,maximized:false};
     if(r.op==='edit'){state.editor.work=r.work;state.editor.revision++;state.editor.dirty=true;window.testEdits.push(structuredClone(r.work));}
     if(r.op==='eq')state.eqEnabled=r.enabled;
-    if(r.op==='setup')data={endpoint:r.endpoint,busy:false,state:r.action==='Install'?'attached':'available',installation:r.action==='Install'?'installed':'not_installed',canInstall:r.action!=='Install',canRemove:r.action==='Install'};
+    if(r.op==='setup'){
+      if(r.action==='Install')installed.add(r.endpoint);
+      if(r.action==='Remove')installed.delete(r.endpoint);
+      const attached=installed.has(r.endpoint);
+      data={endpoint:r.endpoint,busy:false,state:attached?'attached':'available',installation:attached?'installed':'not_installed',canInstall:!attached,canRemove:attached};
+    }
     if(r.op==='setup'&&r.action==='Remove'&&window.holdRemoval)data={endpoint:r.endpoint,busy:true,state:'removing',canInstall:false,canRemove:false};
     if(r.op==='setup'&&r.action==='Inspect'&&window.holdInspection)data={endpoint:r.endpoint,busy:true,state:'checking',canInstall:false,canRemove:false};
     if(r.op==='import')data={valid:true,issues:[],layer:{name:'Imported',all:true,mask:0,gain:0,on:true,filters:[filter(-3)]}};
@@ -144,8 +154,53 @@ const checks=async()=>{
     window.testSetup({endpoint:'test-second',state:'available',installation:'not_installed',busy:false,canInstall:true,canRemove:false});await wait(30);
     assert($('[data-setup-act="install"]')&&!$('[data-setup-act="uninstall"]')&&!S.setupConfirm,'Finished removal left stale uninstall UI');
     $('[data-settings-tab="general"]').click();$('[data-theme-choice="light"]').click();assert(document.documentElement.dataset.theme==='light','General appearance preference failed');
-    $('[data-act="back-eq"]').click();assert($('#graph')&&APP.eqEnabled===false&&JSON.stringify(P().work)===workBefore,'Returning from Settings lost the editor or master state');
+    $('[data-act="back-eq"]').click();await wait(60);assert($('#graph')&&APP.eqEnabled===false&&JSON.stringify(P().work)===workBefore,'Returning from Settings lost the editor or master state');
     results.push('Global EQ is independent of profiles; single Install; uninstall review clears on start and progress stays stable through verification');
+
+    // Installed/idle is editable. A confirmed uninstall wins over stale live
+    // status, hides both empty-profile and existing-profile controls, and never
+    // discards the draft. Keyboard shortcuts cannot bypass the installation UI.
+    const draft=JSON.stringify(P().work),profile=structuredClone(P()),revision=P().revision;
+    acceptSetup({endpoint:'test-output',state:'attached',installation:'installed',canRemove:true});
+    window.testStatus({endpoint:'waiting_for_audio',running:'unavailable'});
+    assert($('#graph')&&!$('.installation-view'),'Installed idle device was blocked');
+    acceptSetup({endpoint:'test-output',state:'available',installation:'not_installed',canInstall:true});
+    assert($('.installation-view')&&!$('#graph')&&!$('#profileBtn')&&!$('[data-act="new-profile"]')&&!$('[data-act="eq"]'),'Uninstalled device retained EQ controls');
+    assert($('#installationTitle').textContent==='Contour isn’t installed on this device','Missing installation was not explained');
+    const blockedCount=window.testRequests.length;
+    for(const value of ['s','z','y'])document.body.dispatchEvent(new KeyboardEvent('keydown',{key:value,ctrlKey:true,bubbles:true,cancelable:true}));
+    key(document.body,'Delete');addBand(F('PK',1200,4,1));await wait(40);
+    assert(window.testRequests.length===blockedCount,'Blocked editor issued a command: '+JSON.stringify(window.testRequests.slice(blockedCount)));
+    assert(JSON.stringify(P().work)===draft&&P().revision===revision,'Blocked editor still changed the profile');
+    window.testStatus({endpoint:'ready',running:'processed_match',applied:true});
+    assert($('.installation-view')&&!$('#graph'),'Stale engine report overrode confirmed removal');
+    const gatedNode=$('.installation-view');window.testStatus({endpoint:'waiting_for_audio',running:'unavailable'});
+    assert($('.installation-view')===gatedNode,'Runtime updates rebuilt the installation screen');
+    $('[data-act="device-setup"]').click();await wait(60);
+    assert(S.view==='settings'&&S.settingsDevice==='test-output'&&$('[data-device-detail="test-output"]')&&!$('[data-device-detail="test-output"]').hidden,'Installation action did not open the selected device');
+    assert(APP.device==='test-output'&&JSON.stringify(P().work)===draft,'Opening installation changed the draft or output');
+    $('[data-act="back-eq"]').click();
+    // A device without a profile must still show installation first.
+    APP.editor=null;render();assert($('.installation-view')&&!$('[data-act="new-profile"]'),'No-profile welcome bypassed installation');
+    acceptSetup({endpoint:'test-output',state:'attached',installation:'installed',canRemove:true});
+    assert($('[data-act="new-profile"]')&&!$('.installation-view'),'Installed device did not offer profile creation');
+    APP.editor=profile;render();assert($('#graph')&&JSON.stringify(P().work)===draft,'Restoring installation lost the existing draft');
+    results.push('Installation gates profile creation, editing, global-toggle display and shortcuts; idle installed outputs stay editable; device setup targets the current output and preserves drafts');
+
+    // No profile means there is no EndpointSession yet. Inspect the selected
+    // output independently instead of mistaking that for an installed device.
+    APP.device='test-second';APP.editor=null;APP.status={endpoint:'unavailable'};
+    setupReports.delete(APP.device);setupCache.delete(APP.device);
+    editorChecks.set(APP.device,{stamp:setupDeviceStamp(D()),time:Date.now()});
+    window.holdInspection=true;const checksBefore=window.testRequests.length;render();await wait(40);
+    assert(editorGate()==='checking'&&$('.installation-view')&&!$('[data-act="new-profile"]'),'Unknown installation exposed profile creation');
+    const inspection=window.testRequests.slice(checksBefore).filter(r=>r.op==='setup');
+    assert(inspection.length===1&&inspection[0].action==='Inspect'&&inspection[0].endpoint==='test-second','Selected-device check was skipped or scanned unrelated devices');
+    window.holdInspection=false;window.testSetup({endpoint:'test-second',state:'blocked',installation:'unknown',reason:'inspection_failed',busy:false,canInstall:false});
+    assert(editorGate()==='unknown'&&$('#installationTitle').textContent==='Couldn’t check this device','Failed check claimed the device was uninstalled');
+    window.testSetup({endpoint:'test-second',state:'blocked',installation:'not_installed',reason:'existing_effects',busy:false,canInstall:false});
+    assert($('.installation-view').textContent.includes('existing audio effects')&&$('[data-act="device-setup"]').textContent==='Manage device','Unsupported device offered installation');
+    results.push('Unassigned outputs get one selected-device inspection; invalidated reports are rechecked; unknown and unsupported results stay distinct');
     finish();
   }catch(error){finish(error);}
 };

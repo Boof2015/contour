@@ -13,7 +13,7 @@ const context=vm.createContext({setTimeout,clearTimeout,console,requestAnimation
 const evaluate=s=>vm.runInContext(s,context);
 const copy=o=>JSON.parse(JSON.stringify(o));
 const turn=()=>new Promise(r=>setImmediate(r));
-let state={device:'output',devices:[{id:'output',name:'Output',channels:2,rate:48000,mask:3,available:true}],profiles:[],closing:{state:'open'},status:{endpoint:'not_attached'},
+let state={device:'output',devices:[{id:'output',name:'Output',channels:2,rate:48000,mask:3,available:true}],profiles:[],closing:{state:'open'},status:{endpoint:'ready'},
   editor:{id:'profile',name:'Profile',channels:2,rate:48000,curveRate:48000,revision:1,dirty:false,undo:false,redo:false,work:{bypass:false,layers:[{name:'Layer',all:true,mask:0,gain:0,on:true,filters:[]}]}}};
 function reply(request,data=state){messageHandler({data:{requestId:request.requestId,ok:true,data:copy(data)}});}
 async function take(op){await turn();const request=posts.shift();assert.equal(request?.op,op);return request;}
@@ -114,6 +114,7 @@ async function main(){
   messageHandler({data:{event:'setup',data:{endpoint:'output',state:'attached',busy:false,canInstall:false,canRemove:true}}});
   await new Promise(resolve=>setTimeout(resolve,5));
   const masterAfterInstall=await take('eq');assert.equal(masterAfterInstall.enabled,false,'Installation re-enabled globally bypassed EQ');reply(masterAfterInstall);await turn();
+  evaluate("APP.status.endpoint='waiting_for_audio';");
   assert.ok(evaluate("deviceMessage(D(),setupReports.get('output'))").includes('no playback is needed'),'Installed still asks the user to play audio');
   evaluate("APP.devices[0].connection={confirmed:true};");
   assert.equal(evaluate("statusSummary({endpoint:'waiting_for_audio'},P(),false).label"),'EQ bypassed');
@@ -136,6 +137,7 @@ async function main(){
   messageHandler({data:{event:'setup',data:{endpoint:'output',state:'available',busy:false,canInstall:true,canRemove:false}}});
   assert.equal(evaluate('setupOperation'),null,'Removal never finished');
   assert.ok(evaluate("deviceDetails(D(),setupReports.get('output'))").includes('data-setup-act="install"'),'Completed removal did not restore Install');
+  evaluate("setupReports.set('output',{state:'attached',installation:'installed'});");
 
   // Continuous input must publish before it stops, and a slow host must not
   // accumulate a queue of obsolete parameter snapshots.

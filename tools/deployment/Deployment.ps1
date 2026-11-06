@@ -8,6 +8,7 @@ $script:ClassIds = @('{D1F3F732-FD5B-48AB-A989-5086B6FBEA37}', '{E841587D-E457-4
 $script:EffectPrefix = '{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},'
 $script:DisableEffects = '{1da5d803-d492-4edd-8c23-e0c0ffee7f0e},5'
 $script:AudioSettings = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Audio'
+. (Join-Path $PSScriptRoot 'EffectPlacement.ps1')
 
 function ConvertTo-HexString([string] $Text) {
     [BitConverter]::ToString([Text.Encoding]::Unicode.GetBytes($Text + [char]0)).Replace('-', '')
@@ -43,11 +44,7 @@ function New-ContourPlan($Store, $Info, [string] $Dll, [string] $Hash, [string] 
     if (-not $Store.Exists($fx) -or -not $Store.Exists($properties)) {
         throw 'This lab installer requires an existing endpoint effect store.'
     }
-    foreach ($entry in $Store.Entries($fx)) {
-        if ($entry.Name -match '^\{d04e05a6-594b-4fb6-a80d-01af5eed7d1d\},(1|2|[5-9]|1[0-9]|20)$') {
-            throw "Existing audio effect assignment requires a coexistence strategy: $($entry.Name)"
-        }
-    }
+    $placement=Get-AvailableEffectPlacement $Store $Info.Endpoint.Id
     foreach ($path in @($fx, $properties)) {
         $disabled = $Store.Read($path, $script:DisableEffects)
         if ($null -ne $disabled -and -not (Test-RawEqual $disabled ([pscustomobject]@{Type=4;Data='00000000'}))) {
@@ -83,9 +80,14 @@ function New-ContourPlan($Store, $Info, [string] $Dll, [string] $Hash, [string] 
                 After=[pscustomobject]@{Type=$value.Type;Data=$value.Data}})
         }
     }
-    for ($index = 0; $index -lt 2; ++$index) {
-        $changes.Add([pscustomobject]@{Path=$fx;Name=($script:EffectPrefix+($index+1));Before=$null;
-            After=[pscustomobject]@{Type=1;Data=(ConvertTo-HexString $script:ClassIds[$index])}})
+    if ($null -ne $placement) {
+        $original=$placement.Guards[2].Value
+        $changes.Add([pscustomobject]@{Path=$fx;Name=($script:EffectPrefix+'15');Before=$original;After=(Add-CompositeClass $original $script:ClassIds[1])})
+    } else {
+        for ($index = 0; $index -lt 2; ++$index) {
+            $changes.Add([pscustomobject]@{Path=$fx;Name=($script:EffectPrefix+($index+1));Before=$null;
+                After=[pscustomobject]@{Type=1;Data=(ConvertTo-HexString $script:ClassIds[$index])}})
+        }
     }
     $guards = @($fx, $properties) + $createdKeys
     $plan = [pscustomobject]@{
@@ -95,12 +97,15 @@ function New-ContourPlan($Store, $Info, [string] $Dll, [string] $Hash, [string] 
         Guards=@($guards | ForEach-Object { [pscustomobject]@{Path=$_;Snapshot=$Store.Snapshot($_)} });
         CreateKeys=$createdKeys;Changes=$changes.ToArray()
     }
+    if ($null -ne $placement) { $plan.Schema=2;$plan | Add-Member NoteProperty Placement $placement }
     Assert-ContourPlan $plan
     return $plan
 }
 
 function Assert-ContourPlan($Plan) {
-    if ($Plan.Schema -ne 1 -or $Plan.DllSha256 -notmatch '^[0-9A-F]{64}$') { throw 'Invalid plan schema or hash.' }
+    if ($Plan.Schema -notin @(1,2) -or $Plan.DllSha256 -notmatch '^[0-9A-F]{64}$') { throw 'Invalid plan schema or hash.' }
+    $composite=$Plan.Schema -eq 2
+    if ($composite) { Assert-CompositePlacement $Plan.Placement }
     $expectedPackage = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) ('ContourLab-'+([guid]::Parse($Plan.Id)).ToString('D'))
     if ($Plan.Package -cne $expectedPackage -or $Plan.TargetDll -cne (Join-Path $expectedPackage 'contour-apo.dll')) {
         throw 'Invalid package destination.'
@@ -115,12 +120,18 @@ function Assert-ContourPlan($Plan) {
         'MaxInstances','NumAPOInterfaces','APOInterface0')
     $seen = @{}
     foreach ($change in $Plan.Changes) {
-        if ($null -ne $change.Before) { throw 'This installer only adds previously absent values.' }
+        if ($null -ne $change.Before -and -not ($composite -and $change.Path -eq $fx)) { throw 'This installer only adds previously absent values.' }
         $identity = $change.Path + '|' + $change.Name
         if ($seen.ContainsKey($identity)) { throw 'Duplicate registry change.' }
         $seen[$identity] = $true
         if ($change.After.Data -cnotmatch '^([0-9A-F]{2}){0,4096}$') { throw 'Invalid value bytes.' }
         if ($change.Path -eq $fx) {
+            if ($composite) {
+                if ($change.Name -cne ($script:EffectPrefix+'15') -or
+                    -not (Test-RawEqual $change.Before $Plan.Placement.Guards[2].Value) -or
+                    -not (Test-RawEqual $change.After (Add-CompositeClass $change.Before $script:ClassIds[1]))) { throw 'Invalid composite endpoint change.' }
+                continue
+            }
             $stage = [array]::IndexOf(@(($script:EffectPrefix+'1'),($script:EffectPrefix+'2')), $change.Name)
             if ($stage -lt 0 -or $change.After.Type -ne 1 -or
                 $change.After.Data -cne (ConvertTo-HexString $script:ClassIds[$stage])) { throw 'Invalid endpoint change.' }
@@ -133,7 +144,9 @@ function Assert-ContourPlan($Plan) {
             } elseif ($change.Name -ne '' -or $change.After.Type -ne 1) { throw 'Invalid COM class name.' }
         } else { throw 'Change is outside the endpoint/Contour registration allowlist.' }
     }
-    if (@($Plan.Changes).Count -ne 32 -or -not $seen.ContainsKey($fx+'|'+$script:EffectPrefix+'1') -or
+    if ($composite) {
+        if (@($Plan.Changes).Count -ne 31 -or -not $seen.ContainsKey($fx+'|'+$script:EffectPrefix+'15')) { throw 'Incomplete composite registration plan.' }
+    } elseif (@($Plan.Changes).Count -ne 32 -or -not $seen.ContainsKey($fx+'|'+$script:EffectPrefix+'1') -or
         -not $seen.ContainsKey($fx+'|'+$script:EffectPrefix+'2')) { throw 'Incomplete registration plan.' }
 }
 
@@ -202,7 +215,10 @@ function Invoke-ContourRestore($Store, $Journal, [string] $JournalPath) {
         try {
             $current = $Store.Read($change.Path,$change.Name)
             if (Test-RawEqual $current $change.After) {
-                $Store.DeleteValue($change.Path,$change.Name)
+                if (-not (Test-RawEqual ($Store.Read($change.Path,$change.Name)) $change.After)) { throw 'Value changed during restoration.' }
+                if ($null -eq $change.Before) { $Store.DeleteValue($change.Path,$change.Name) }
+                else { $Store.Write($change.Path,$change.Name,$change.Before.Type,$change.Before.Data) }
+                if (-not (Test-RawEqual ($Store.Read($change.Path,$change.Name)) $change.Before)) { throw 'Restoration did not persist.' }
             } elseif (-not (Test-RawEqual $current $change.Before)) {
                 $Journal.Conflicts += "$($change.Path) [$($change.Name)] changed externally"
                 if ($change.Path -eq $fx) { $endpointConflict = $true }

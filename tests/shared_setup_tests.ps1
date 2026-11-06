@@ -65,7 +65,23 @@ public static class ContourJournalReader {
     $raw=& (Join-Path $BinaryDirectory 'contour-deploy-info.exe') (Join-Path $BinaryDirectory 'contour-apo.dll') --registration-only
     Assert ($LASTEXITCODE -eq 0) 'Cannot inspect fixture DLL';$info=$raw | ConvertFrom-Json
     $root=$user.CreateSubKey($testPath)
-    function New-Fixture($Before=$null) {
+    function Set-VendorEffects($Store,[string]$Endpoint) {
+        $fx=(Get-EndpointPath $Endpoint)+'\FxProperties'
+        foreach ($id in @(13,14,15)) {
+            $list=if ($id -eq 15) { '{aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa}'+[char]0+'{bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb}' }
+                else { '{cccccccc-cccc-4ccc-8ccc-cccccccccccc}' }
+            $Store.Write($fx,$script:EffectPrefix+$id,7,((ConvertTo-HexString $list)+'0000'))
+        }
+        foreach ($id in @(5,6,7)) {
+            $Store.Write($fx,'{d3993a3f-99c2-4402-b5ec-a92a0367664b},'+$id,7,((ConvertTo-HexString '{C18E2F7E-933D-4965-B7D1-1EEF228D2AF3}')+'0000'))
+        }
+        $Store.Create($fx+'\VendorContext');$Store.Write($fx+'\VendorContext','Keep',3,'CAFE')
+    }
+    function VendorState($Store,[string]$Endpoint) {
+        $fx=(Get-EndpointPath $Endpoint)+'\FxProperties'
+        [pscustomobject]@{Values=@(Get-CompositeGuardNames | ForEach-Object { $Store.Read($fx,$_) });Context=$Store.Snapshot($fx+'\VendorContext');Security=$Store.Security($fx)} | ConvertTo-Json -Depth 8 -Compress
+    }
+    function New-Fixture($Before=$null,[switch]$Composite) {
         $id=[guid]::NewGuid().ToString('D');$registry=$root.CreateSubKey($id)
         $package=Join-Path $work $id;[void][IO.Directory]::CreateDirectory($package)
         $a='{0.0.0.00000000}.{11111111-1111-4111-8111-111111111111}'
@@ -77,6 +93,8 @@ public static class ContourJournalReader {
         }
         $store=[Contour.Deployment.RegistryStore]::new($registry,$true);$stores.Add($store)
         if ($null -ne $Before) { $store.Write($script:AudioSettings,'DisableProtectedAudioDG',4,$Before) }
+        $vendorBefore=$null
+        if ($Composite) { Set-VendorEffects $store $a;$vendorBefore=VendorState $store $a }
         $info.Endpoint=[pscustomobject]@{Id=$a;Name='Fixture A';State=1;Channels=2;SampleRate=48000}
         $plan=New-ContourPlan $store $info (Join-Path $BinaryDirectory 'contour-apo.dll') ('A'*64) $id
         Save-ContourJournal (New-ContourJournal $plan) (Join-Path $package 'journal.json') -CreateNew
@@ -85,7 +103,7 @@ public static class ContourJournalReader {
         Invoke-DeviceSetup $store $state $package Install $callbacks.CaptureServices $callbacks.StopAudio $callbacks.StartAudio
         $store.Write((Get-ControlContextKeys $a)[2],$script:ControlContextId+',4',3,'AABBCC')
         $f=[pscustomobject]@{Store=$store;Package=$package;A=$a;B=$b;Id=$id;Original=$state;
-            SavedA=Get-EndpointSettings $store $a;Globals=$store.Snapshot('SOFTWARE\Classes');Registry=($testPath+'\'+$id)}
+            SavedA=Get-EndpointSettings $store $a;Globals=$store.Snapshot('SOFTWARE\Classes');Registry=($testPath+'\'+$id);VendorBefore=$vendorBefore}
         Save-ContourJournal ([pscustomobject]@{Registry=$f.Registry;Package=$package;A=$a;B=$b}) (Join-Path $package 'worker.json') -CreateNew
         return $f
     }
@@ -173,6 +191,124 @@ public static class ContourJournalReader {
     Assert ((Read-DeploymentState (Join-Path $f.Package 'endpoints.json')).Bindings.Count -eq 1) 'Failed verification retained a new binding.'
     Unchanged $f
     ++$passed;Write-Output 'PASS failed second-device engine check rolls back only that attachment'
+
+    foreach ($remove in @('A','B')) {
+        $f=New-Fixture;$callbacks=Callbacks $f.Store $f.Package
+        Set-VendorEffects $f.Store $f.B;$original=VendorState $f.Store $f.B
+        ConvertTo-SharedSetup $f.Store $f.Package 'USB\A\1'
+        Invoke-SharedDeviceSetup $f.Store $f.Package Install $f.B 'Composite B' 'USB\B\2' @callbacks
+        $path=Join-Path $f.Package 'endpoints.json';$catalog=Read-DeploymentState $path
+        Assert ($catalog.Schema -eq 3 -and (Get-Binding $catalog $f.B).Placement.Kind -eq 'CompositeEndpoint') 'Composite ownership was not versioned.'
+        $old=$catalog.Schema;$catalog.Schema=2;Fails { Assert-DeploymentState $catalog };$catalog.Schema=$old
+        $fx=(Get-EndpointPath $f.B)+'\FxProperties'
+        Assert (@(Read-EffectClassList ($f.Store.Read($fx,$script:EffectPrefix+'15'))).Count -eq 3) 'Expected two vendor effects plus one Contour instance.'
+        Assert ($null -eq $f.Store.Read($fx,$script:EffectPrefix+'1') -and $null -eq $f.Store.Read($fx,$script:EffectPrefix+'2')) 'Composite installation also wrote legacy slots.'
+        $f.Store.Write((Get-ControlContextKeys $f.B)[2],$script:ControlContextId+',4',3,'DDEEFF')
+        Invoke-SharedDeviceSetup $f.Store $f.Package Remove $f.$remove '' '' @callbacks
+        $other=if ($remove -eq 'A') { $f.B } else { $f.A }
+        Invoke-SharedDeviceSetup $f.Store $f.Package Remove $other '' '' @callbacks
+        Assert ((VendorState $f.Store $f.B) -ceq $original) 'Removal changed vendor effects, settings, order, or access.'
+        Invoke-SharedDeviceSetup $f.Store $f.Package Install $f.B 'Composite B' 'USB\B\2' @callbacks
+        Assert ($f.Store.Read((Get-ControlContextKeys $f.B)[2],$script:ControlContextId+',4').Data -eq 'DDEEFF') 'Composite reinstallation lost saved EQ.'
+        Unchanged $f
+        ++$passed;Write-Output "PASS composite and legacy coexist; remove $remove first; preserve vendor effects and saved EQ"
+    }
+    foreach ($point in @('prepared','intent-0','written-0','audio-restarted','committed')) {
+        $f=New-Fixture;$callbacks=Callbacks $f.Store $f.Package
+        Set-VendorEffects $f.Store $f.B;$original=VendorState $f.Store $f.B
+        ConvertTo-SharedSetup $f.Store $f.Package 'USB\A\1'
+        Crash $f Install $point
+        Invoke-SharedDeviceSetup $f.Store $f.Package Remove $f.B '' '' @callbacks
+        Assert ((VendorState $f.Store $f.B) -ceq $original) 'Interrupted composite operation damaged vendor state.'
+        Assert ([IO.File]::ReadAllText((Join-Path $f.Package 'audio.txt')) -eq 'running') 'Composite recovery left audio stopped.'
+        Unchanged $f
+        ++$passed;Write-Output "PASS composite worker termination at $point preserves vendor state"
+    }
+    $f=New-Fixture;$callbacks=Callbacks $f.Store $f.Package
+    Set-VendorEffects $f.Store $f.B;$original=VendorState $f.Store $f.B
+    ConvertTo-SharedSetup $f.Store $f.Package 'USB\A\1'
+    $callbacks.VerifyApplied={param($Endpoint,$Registration,$Binding) $null -eq $Binding}
+    Fails { Invoke-SharedDeviceSetup $f.Store $f.Package Install $f.B 'Composite B' 'USB\B\2' @callbacks }
+    Assert ((VendorState $f.Store $f.B) -ceq $original) 'Failed composite engine check damaged vendor state.'
+    Assert ($null -eq (Read-DeploymentState (Join-Path $f.Package 'endpoints.json')).Operation) 'Failed composite check did not finish recovery.'
+    Unchanged $f
+    ++$passed;Write-Output 'PASS composite engine failure restores original vendor chain'
+
+    $f=New-Fixture;$callbacks=Callbacks $f.Store $f.Package
+    Set-VendorEffects $f.Store $f.B
+    ConvertTo-SharedSetup $f.Store $f.Package 'USB\A\1'
+    Invoke-SharedDeviceSetup $f.Store $f.Package Install $f.B 'Composite B' 'USB\B\2' @callbacks
+    $fx=(Get-EndpointPath $f.B)+'\FxProperties'
+    $foreign=Add-CompositeClass ($f.Store.Read($fx,$script:EffectPrefix+'15')) '{dddddddd-dddd-4ddd-8ddd-dddddddddddd}'
+    $f.Store.Write($fx,$script:EffectPrefix+'15',$foreign.Type,$foreign.Data)
+    Fails { Invoke-SharedDeviceSetup $f.Store $f.Package Remove $f.B '' '' @callbacks }
+    Assert (Test-RawEqual ($f.Store.Read($fx,$script:EffectPrefix+'15')) $foreign) 'Removal overwrote a later vendor change.'
+    Unchanged $f
+    ++$passed;Write-Output 'PASS later vendor changes block stale composite removal without overwriting them'
+
+    $f=New-Fixture;$callbacks=Callbacks $f.Store $f.Package
+    Set-VendorEffects $f.Store $f.B
+    ConvertTo-SharedSetup $f.Store $f.Package 'USB\A\1'
+    $interrupt={param($Point)
+        if ($Point -eq 'written-0') {
+            $fx=(Get-EndpointPath $f.B)+'\FxProperties'
+            $new=Add-CompositeClass ($f.Store.Read($fx,$script:EffectPrefix+'15')) '{dddddddd-dddd-4ddd-8ddd-dddddddddddd}'
+            $f.Store.Write($fx,$script:EffectPrefix+'15',$new.Type,$new.Data)
+            throw 'Concurrent vendor writer'
+        }
+    }
+    Fails { Invoke-SharedDeviceSetup $f.Store $f.Package Install $f.B 'Composite B' 'USB\B\2' @callbacks -Checkpoint $interrupt }
+    $fx=(Get-EndpointPath $f.B)+'\FxProperties'
+    Assert (@(Read-EffectClassList ($f.Store.Read($fx,$script:EffectPrefix+'15'))).Count -eq 4) 'Rollback removed a foreign list entry.'
+    $catalog=Read-DeploymentState (Join-Path $f.Package 'endpoints.json')
+    Assert ($catalog.Operation.Phase -eq 'RecoveryRequired') 'A conflicted rollback claimed success.'
+    Assert ([IO.File]::ReadAllText((Join-Path $f.Package 'audio.txt')) -eq 'running') 'Conflicted rollback left audio stopped.'
+    Unchanged $f
+    ++$passed;Write-Output 'PASS foreign change during composite write is retained with recovery intent'
+
+    $f=New-Fixture -Composite;$callbacks=Callbacks $f.Store $f.Package
+    $plan=(Read-SetupJson (Join-Path $f.Package 'journal.json')).Plan
+    Assert ($plan.Schema -eq 2 -and $plan.Changes.Count -eq 31) 'First-device composite plan is not versioned.'
+    Invoke-DeviceSetup $f.Store $f.Original $f.Package Remove $callbacks.CaptureServices $callbacks.StopAudio $callbacks.StartAudio
+    Assert ((VendorState $f.Store $f.A) -ceq $f.VendorBefore) 'Standalone composite removal lost vendor effects.'
+    ++$passed;Write-Output 'PASS first-device composite installation/removal restores vendor bytes'
+
+    # With no registered runtime left, exercise actual first-install verification
+    # failure and restoration of a vendor chain (not only the shared path).
+    Set-VendorEffects $f.Store $f.B;$vendorBefore=VendorState $f.Store $f.B
+    $id=[guid]::NewGuid().ToString('D');$package=Join-Path $work $id;[void][IO.Directory]::CreateDirectory($package)
+    $info.Endpoint=[pscustomobject]@{Id=$f.B;Name='First composite';State=1;Channels=2;SampleRate=48000}
+    $plan=New-ContourPlan $f.Store $info (Join-Path $BinaryDirectory 'contour-apo.dll') ('A'*64) $id
+    Save-ContourJournal (New-ContourJournal $plan) (Join-Path $package 'journal.json') -CreateNew
+    $state=New-SetupState $plan;Save-SetupState $state $package;$callbacks=Callbacks $f.Store $package
+    Fails { Invoke-DeviceSetup $f.Store $state $package Install $callbacks.CaptureServices $callbacks.StopAudio $callbacks.StartAudio -VerifyInstalled {param($Endpoint) $false} }
+    Assert ((VendorState $f.Store $f.B) -ceq $vendorBefore -and $state.State -eq 'Removed') 'First-install verification failure did not restore vendor state.'
+    foreach ($key in @(Get-ContourClassKeys)) { Assert (-not $f.Store.Exists($key)) 'Failed first install retained registration.' }
+    Assert ([IO.File]::ReadAllText((Join-Path $package 'audio.txt')) -eq 'running') 'Failed first install left audio stopped.'
+    ++$passed;Write-Output 'PASS first-device failed engine verification restores vendor effects and audio'
+
+    $f=New-Fixture -Composite;$callbacks=Callbacks $f.Store $f.Package
+    ConvertTo-SharedSetup $f.Store $f.Package 'USB\A\1'
+    Invoke-SharedDeviceSetup $f.Store $f.Package Remove $f.A '' '' @callbacks
+    Assert ((VendorState $f.Store $f.A) -ceq $f.VendorBefore) 'Adopted composite installation lost vendor effects.'
+    Unchanged $f
+    ++$passed;Write-Output 'PASS first-device composite installation transfers to shared ownership and preserves saved EQ'
+
+    foreach ($bad in @('scalar','unterminated','duplicate','own','mixed','nested')) {
+        $f=New-Fixture;Set-VendorEffects $f.Store $f.B;$fx=(Get-EndpointPath $f.B)+'\FxProperties'
+        switch ($bad) {
+            scalar { $f.Store.Write($fx,$script:EffectPrefix+'15',1,(ConvertTo-HexString '{aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa}')) }
+            unterminated { $f.Store.Write($fx,$script:EffectPrefix+'15',7,(ConvertTo-HexString '{aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa}')) }
+            duplicate { $f.Store.Write($fx,$script:EffectPrefix+'15',7,((ConvertTo-HexString ('{aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa}'+[char]0+'{AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA}'))+'0000')) }
+            own { $f.Store.Write($fx,$script:EffectPrefix+'15',7,((ConvertTo-HexString $script:ClassIds[1])+'0000')) }
+            mixed { $f.Store.Write($fx,$script:EffectPrefix+'7',1,(ConvertTo-HexString '{aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa}')) }
+            nested { $f.Store.Write($fx+'\VendorContext',$script:EffectPrefix+'15',7,((ConvertTo-HexString '{aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa}')+'0000')) }
+        }
+        $before=$f.Store.Snapshot($fx)
+        Fails { Get-AvailableEffectPlacement $f.Store $f.B }
+        Assert ($f.Store.Snapshot($fx) -ceq $before) 'Unsupported effects were mutated.'
+        ++$passed;Write-Output "PASS reject unsupported composite arrangement: $bad"
+    }
     Write-Output "$passed shared setup cases passed; no real audio or HKLM changes."
 } catch {
     Write-Output $_.ScriptStackTrace

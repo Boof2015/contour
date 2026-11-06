@@ -14,12 +14,50 @@ function prioritizeCheck(endpoint){
   scanQueue=[endpoint,...scanQueue.filter(id=>id!==endpoint)];scanNext();
 }
 const installation=s=>s?.installation||(s?.state==='attached'?'installed':s?.state==='recovery'?'incomplete':s?.state==='available'?'not_installed':'unknown');
+// Installation is independent of profiles and of whether audio is playing.
+// A retained settings context/old runtime report is not proof of attachment.
+function editorGate(){
+  if(!APP)return 'checking';
+  const d=D(),s=setupReports.get(d.id),operation=setupOperation?.endpoint===d.id?setupOperation.action:null;
+  if(operation)return operation==='Install'?'installing':'removing';
+  if(installation(s)==='installed')return '';
+  if(installation(s)==='incomplete')return 'attention';
+  if(installation(s)==='not_installed')return 'not_installed';
+  if(!d.available)return 'disconnected';
+  if(s&&!s.busy)return 'unknown';
+  if(APP.status.endpoint==='ready'||d.connection?.confirmed)return '';
+  if(APP.status.endpoint==='not_attached')return 'not_installed';
+  return 'checking';
+}
+const editorChecks=new Map();
+function ensureEditorCheck(){
+  if(!APP||S.view!=='editor'||setupOperation)return;
+  const d=D(),key=setupDeviceStamp(d),attempt=editorChecks.get(d.id);
+  if(!d.available||setupCheckFresh(d)||inspectingDevice(d.id))return;
+  if(setupReports.has(d.id)&&attempt?.stamp===key&&Date.now()-attempt.time<60000)return;
+  editorChecks.set(d.id,{stamp:key,time:Date.now()});prioritizeCheck(d.id);
+}
+function installationView(gate){
+  const messages={
+    not_installed:['Contour isn’t installed on this device','Install Contour to apply EQ to '+D().name+'.','Install Contour'],
+    checking:['Checking this device…','Checking whether Contour is installed.',''],
+    installing:['Installing Contour…','Audio will return when installation finishes.',''],
+    removing:['Uninstalling Contour…','Your profiles will be kept.',''],
+    attention:['Installation needs attention','Review this device’s installation in Settings.','Manage device'],
+    unknown:['Couldn’t check this device','Review its installation status in Settings before editing EQ.','Check device'],
+    disconnected:['This device is disconnected','Reconnect '+D().name+' to check its installation.','Manage device']
+  };
+  const [title,detail,action]=messages[gate],s=setupReports.get(APP.device);
+  const unsupported=gate==='not_installed'&&s&&!s.busy&&!s.canInstall;
+  return `<main class="welcome installation-view" aria-labelledby="installationTitle"><h2 id="installationTitle">${esc(title)}</h2><p role="status">${esc(unsupported?deviceMessage(D(),s):detail)}</p>${action?`<button class="prim" data-act="device-setup">${unsupported?'Manage device':action}</button>`:''}</main>`;
+}
 function installationLabel(s){
   if(s?.busy)return s.state==='installing'?'Installing…':s.state==='removing'?'Uninstalling…':'Checking…';
   return {installed:'Installed',not_installed:'Not installed',incomplete:'Needs attention',unknown:'Not checked'}[installation(s)];
 }
 function compatibilityLabel(d,s){
   if(!d.available)return d.state===2?'Disabled':'Disconnected';
+  if(s?.reason==='existing_effects')return 'Not supported yet';
   if(d.channels>32||(d.rate&& (d.rate<8000||d.rate>384000)))return 'Unsupported format';
   if(installation(s)==='installed'){
     if(d.connection?.checking)return 'Checking';
@@ -53,6 +91,7 @@ function deviceMessage(d,s){
   }
   if(s?.reason==='another_device')return `This preview supports one installed device at a time. Uninstall Contour from ${s.otherDevice||'the other device'} before installing it here.`;
   if(s?.reason==='preview_requirements')return 'Installation is not available on this computer with this preview.';
+  if(s?.reason==='existing_effects')return 'Contour does not yet support installation alongside this device’s existing audio effects.';
   if(s?.canInstall)return 'Contour can be installed on this device.';
   if(s?.state==='blocked')return 'Contour could not confirm that installation is available. Check again or review the troubleshooting details.';
   return 'Check this device to see whether Contour can be installed.';
@@ -90,9 +129,9 @@ function updateSettingsStatus(){
     }
   });
 }
-async function openSettings(tab='outputs'){
+async function openSettings(tab='outputs',endpoint=null){
   document.activeElement?.blur();endGesture();await flush();
-  S.pop=null;S.view='settings';S.settingsTab=tab;S.settingsDevice=null;S.setupConfirm=null;render();
+  S.pop=null;S.view='settings';S.settingsTab=tab;S.settingsDevice=endpoint;S.setupConfirm=null;render();
   if(tab==='outputs')refreshDevices();
 }
 async function refreshDevices(force=false){
@@ -115,7 +154,12 @@ function scanNext(){
   // An explicit action takes the next slot; it never waits for the remaining
   // device list, and is never run concurrently with another setup helper.
   if(pendingSetup){const next=pendingSetup;pendingSetup=null;startSetup(next.action,next.endpoint);return;}
-  if(setupOperation||S.setupConfirm||S.view!=='settings'||S.settingsTab!=='outputs')return;
+  if(setupOperation||S.setupConfirm)return;
+  if(S.view==='editor'){
+    const index=scanQueue.indexOf(APP.device);if(index<0)return;
+    scanQueue.splice(index,1);startSetup('Inspect',APP.device);return;
+  }
+  if(S.view!=='settings'||S.settingsTab!=='outputs')return;
   const endpoint=scanQueue.shift();if(endpoint)startSetup('Inspect',endpoint);
 }
 function acceptSetup(data){
@@ -143,7 +187,7 @@ function acceptSetup(data){
       if(S.view==='settings')refreshDevices();
     },0);
   }
-  updateSettingsStatus();statusbar();
+  updateEditorAvailability();updateSettingsStatus();statusbar();
   if(!data.busy)setTimeout(scanNext,0);
 }
 function setupRequest(action,endpoint=S.settingsDevice){
@@ -162,7 +206,7 @@ async function startSetup(action,endpoint){
     // unsaved input alone. Only an explicit install/remove flushes edits.
     if(action!=='Inspect'){document.activeElement?.blur();endGesture();await flush();}
     SETUP={...setupReports.get(endpoint),endpoint,busy:true,state:action==='Inspect'?'checking':action==='Install'?'installing':'removing'};
-    setupReports.set(endpoint,SETUP);updateSettingsStatus();
+    setupReports.set(endpoint,SETUP);updateEditorAvailability();updateSettingsStatus();
     const result=await rpc('setup',{action,endpoint});scanStarting=false;acceptSetup(result);
   }catch(error){scanStarting=false;if(action!=='Inspect')setupOperation=null;acceptSetup({...SETUP,busy:false,state:'blocked',notice:error.message,canInstall:false,canRemove:false});}
 }

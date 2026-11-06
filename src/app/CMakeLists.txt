@@ -38,6 +38,7 @@ add_custom_target(contour-ui-assets ALL
         "${PROJECT_SOURCE_DIR}/tools/deployment/LegacyMigration.ps1"
         "${PROJECT_SOURCE_DIR}/tools/deployment/ControlContext.ps1"
         "${PROJECT_SOURCE_DIR}/tools/deployment/Deployment.ps1"
+        "${PROJECT_SOURCE_DIR}/tools/deployment/EffectPlacement.ps1"
         "${PROJECT_SOURCE_DIR}/tools/deployment/RegistryStore.cs"
         "$<TARGET_FILE_DIR:contour>/setup"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/ui" "$<TARGET_FILE_DIR:contour>/ui"

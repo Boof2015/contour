@@ -75,6 +75,13 @@ function New-SharedCallbacks($Store,[string]$Package) {
     @{VerifyRegistration=$verify;VerifyApplied=$applied;CaptureServices=${function:Capture-SetupServices};
         StopAudio=${function:Stop-SetupAudio};StartAudio=${function:Start-SetupAudio}}
 }
+function Test-InstalledSetup([string]$SelectedEndpoint) {
+    $checker=Join-Path (Split-Path $PSScriptRoot -Parent) 'contour-endpoint-check.exe'
+    $result=& $checker present $SelectedEndpoint
+    if ($LASTEXITCODE -ne 0) { return $false }
+    $report=$result | ConvertFrom-Json
+    return ($report.verified -is [bool] -and $report.verified)
+}
 function Set-SharedInspection($Store,$Package,$Report) {
     $record=$Package.State;$catalog=Read-DeploymentState (Join-Path $Package.Path 'endpoints.json')
     Assert-SharedCatalog $catalog $record
@@ -100,11 +107,13 @@ function Set-SharedInspection($Store,$Package,$Report) {
     } else {
         [void](Read-PackageInfo)
         Assert-SharedRegistration $Store $Package.Path (Get-Registration $catalog $record.Id)
-        Assert-EndpointAssignments $Store $catalog $EndpointId $null
+        $placement=Get-AvailableEffectPlacement $Store $EndpointId
+        Assert-EndpointAssignments $Store $catalog $EndpointId $null $placement
         [void](New-AudioPolicyJournal $Store)
         if ($null -ne $context -and $context.ContextState -eq 'Ready') { [void](Get-EndpointSettings $Store $EndpointId) }
         else { [void](New-ControlContextPlan $Store $EndpointId) }
         $Report.canInstall=$true
+        if ($null -ne $placement) { $Report.detail='Ready to install. Existing device effects will be kept.' }
     }
     if ($null -ne $catalog.Operation) {
         # Another endpoint owns the interrupted transaction. Keep this row's
@@ -145,7 +154,7 @@ function New-SetupPackage($Plan) {
     # Retain self-contained recovery alongside the DLL. Installed files are
     # immutable; a rebuild in the workspace never overwrites a loaded APO.
     $scripts=Join-Path $path 'setup'; [void][IO.Directory]::CreateDirectory($scripts)
-    foreach ($name in @('contour-setup.ps1','DeviceSetup.ps1','AudioPolicy.ps1','SharedSetup.ps1','EndpointDeployment.ps1','LegacyMigration.ps1','ControlContext.ps1','Deployment.ps1','RegistryStore.cs')) {
+    foreach ($name in @('contour-setup.ps1','DeviceSetup.ps1','AudioPolicy.ps1','SharedSetup.ps1','EndpointDeployment.ps1','LegacyMigration.ps1','ControlContext.ps1','Deployment.ps1','EffectPlacement.ps1','RegistryStore.cs')) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $scripts $name)
     }
     if ((Get-FileHash -LiteralPath $Plan.TargetDll -Algorithm SHA256).Hash -cne $Plan.DllSha256) { throw 'The APO changed while it was staged. No device settings were changed.' }
@@ -235,9 +244,11 @@ try {
             [void](Get-LegacyEndpointRecord $store $a $c (Read-SetupAdapter $p.State.EndpointId))
             [void](Read-PackageInfo)
             $empty=[pscustomobject]@{Registrations=@()}
-            Assert-EndpointAssignments $store $empty $EndpointId $null
+            $placement=Get-AvailableEffectPlacement $store $EndpointId
+            Assert-EndpointAssignments $store $empty $EndpointId $null $placement
             [void](New-ControlContextPlan $store $EndpointId);[void](New-AudioPolicyJournal $store)
             $report.canInstall=$true
+            if ($null -ne $placement) { $report.detail='Ready to install. Existing device effects will be kept.' }
         } elseif ($packages.Count) {
             $report.state='blocked';$report.reason='installation_recovery';$report.detail='Recover the existing Contour installation before adding another device.'
         } else {
@@ -258,7 +269,8 @@ try {
             $plan=New-SetupPlan $store
             if (-not $store.CanWrite(((Get-EndpointPath $EndpointId)+'\FxProperties'))) { throw 'This output does not grant effect setup access. Its permissions were not changed.' }
             $state=New-SetupPackage $plan
-            Invoke-DeviceSetup $store $state $plan.Package Install ${function:Capture-SetupServices} ${function:Stop-SetupAudio} ${function:Start-SetupAudio}
+            Invoke-DeviceSetup $store $state $plan.Package Install ${function:Capture-SetupServices} ${function:Stop-SetupAudio} ${function:Start-SetupAudio} -VerifyInstalled ${function:Test-InstalledSetup}
+            if ($plan.Schema -eq 2) { ConvertTo-SharedSetup $store $plan.Package (Read-SetupAdapter $EndpointId) }
         }
     } else {
         if ($shared.Count) {
@@ -270,7 +282,10 @@ try {
         }
     }
 } catch {
-    if ($Action -eq 'Inspect') { @{endpoint=$EndpointId;state='blocked';installation='unknown';reason='inspection_failed';detail=$_.Exception.Message;canInstall=$false;canRemove=$false;development=$true} | ConvertTo-Json -Compress }
+    if ($Action -eq 'Inspect') {
+        $reason=[string]$_.Exception.Data['reason'];if (-not $reason) { $reason='inspection_failed' }
+        @{endpoint=$EndpointId;state='blocked';installation=$(if ($reason -eq 'existing_effects') { 'not_installed' } else { 'unknown' });reason=$reason;detail=$_.Exception.Message;canInstall=$false;canRemove=$false;development=$true} | ConvertTo-Json -Compress
+    }
     else { Write-Error $_ -ErrorAction Continue }
     exit 1
 } finally {

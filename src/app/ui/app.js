@@ -42,7 +42,7 @@ function adopt(data,document=true){
   fixSel();
 }
 function queueEdit(){
-  if(!P())return; generation++;pendingEdit=true;P().dirty=true;P().undo=true;
+  if(!P()||editorGate())return; generation++;pendingEdit=true;P().dirty=true;P().undo=true;
   // Throttle, rather than debounce: a continuous drag must reach the engine.
   if(!editTimer)editTimer=setTimeout(()=>flush().catch(()=>{}),25);refreshChrome();
 }
@@ -63,6 +63,7 @@ async function flush(){
   if(pendingEdit)return flush();
 }
 async function command(op,args={},quiet=false){
+  if(editorGate()&&['new','select','rename','save_as','duplicate','save','apply','revert','undo','redo'].includes(op))return null;
   try{
     await flush();const data=await rpc(op,args);adopt(data);fixSel();render();handleClose();
     if(!quiet&&op==='save')toast(APP.status.copy==='current'?'Profile saved':'Profile saved · device update pending');
@@ -71,12 +72,12 @@ async function command(op,args={},quiet=false){
 }
 let gesture=false,nudgeTimer=0;
 function push(){} // History is recorded by EditSession::replace, not the web view.
-function beginGesture(){if(!gesture){gesture=true;rpc('begin').catch(e=>toast(e.message));}}
+function beginGesture(){if(!gesture&&!editorGate()){gesture=true;rpc('begin').catch(e=>toast(e.message));}}
 function endGesture(){if(gesture){gesture=false;flush().then(()=>rpc('end')).catch(e=>toast(e.message));}}
 function pushNudge(){beginGesture();clearTimeout(nudgeTimer);nudgeTimer=setTimeout(endGesture,300);}
 function undo(){endGesture();command('undo');}
 function redo(){endGesture();command('redo');}
-function edit(fn){flush().catch(()=>{});fn();fixSel();queueEdit();render();}
+function edit(fn){if(editorGate())return;flush().catch(()=>{});fn();fixSel();queueEdit();render();}
 function addBand(f){if(!L()||L().filters.length>=MAXF)return;edit(()=>{L().filters.push(f);S.band=L().filters.length-1;});}
 function selectBand(i){S.band=i;$$('[data-band]').forEach(el=>el.classList.toggle('sel',+el.dataset.band===i));draw();}
 function refreshChrome(){
@@ -99,8 +100,8 @@ function profileBox(){
   return `<button class="pbtn" id="profileBtn" title="Switch profile"><span class="pn">${esc(p.name)}</span><span class="pl">${p.channels===2?'Stereo':p.channels+' channels'}</span>${p.dirty?'<span class="dot" title="Unsaved changes"></span>':''}${I('chev')}</button>
     ${p.dirty?'<div class="dirty"><span>Unsaved changes</span><button class="lnk" data-act="revert">Revert</button><button class="sbtn" data-act="save">Save</button></div>':''}`;
 }
-function undoBox(){return P()?`<button class="ib" data-act="undo" title="Undo (Ctrl+Z)" aria-label="Undo" ${P().undo?'':'disabled'}>${I('undo')}</button><button class="ib" data-act="redo" title="Redo (Ctrl+Y)" aria-label="Redo" ${P().redo?'':'disabled'}>${I('redo')}</button>`:'';}
-function titlebar(){return `<div class="tb"><div class="brand">${MARK}contour</div>${S.view==='settings'?'<span class="settings-caption">Settings</span>':`<button class="chip" id="devBtn">${I('speaker')}<span class="device-name">${esc(D().name)}</span>${I('chev')}</button>`}<span class="grow"></span>${S.view==='editor'?`<span id="undoBox" style="display:flex;gap:2px">${undoBox()}</span><button class="ib" data-act="settings" title="Settings" aria-label="Settings">${I('settings')}</button>`:''}<span class="power">EQ<button class="sw${APP.eqEnabled===false?'':' on'}" data-act="eq" aria-label="Enable EQ globally" aria-pressed="${APP.eqEnabled!==false}" ${setupOperation?'disabled':''}></button></span>${windowButtons()}</div>`;}
+function undoBox(){return P()&&!editorGate()?`<button class="ib" data-act="undo" title="Undo (Ctrl+Z)" aria-label="Undo" ${P().undo?'':'disabled'}>${I('undo')}</button><button class="ib" data-act="redo" title="Redo (Ctrl+Y)" aria-label="Redo" ${P().redo?'':'disabled'}>${I('redo')}</button>`:'';}
+function titlebar(){return `<div class="tb"><div class="brand">${MARK}contour</div>${S.view==='settings'?'<span class="settings-caption">Settings</span>':`<button class="chip" id="devBtn">${I('speaker')}<span class="device-name">${esc(D().name)}</span>${I('chev')}</button>`}<span class="grow"></span>${S.view==='editor'?`<span id="undoBox" style="display:flex;gap:2px">${undoBox()}</span><button class="ib" data-act="settings" title="Settings" aria-label="Settings">${I('settings')}</button>`:''}${S.view==='settings'||!editorGate()?`<span class="power">EQ<button class="sw${APP.eqEnabled===false?'':' on'}" data-act="eq" aria-label="Enable EQ globally" aria-pressed="${APP.eqEnabled!==false}" ${setupOperation?'disabled':''}></button></span>`:''}${windowButtons()}</div>`;}
 // Fast preview acknowledgements are diagnostics, not separate user-facing
 // connection states. Only a settled mismatch becomes a visible warning.
 let statusIssue='',statusIssueSince=0,statusIssueTimer=0;
@@ -135,20 +136,33 @@ function statusbar(){
   el.querySelector('.indicator').className='indicator '+kind;
   el.title=label;
 }
-function outputNotice(){return P()&&APP.status.endpoint==='not_attached'&&D().available?'<div class="output-notice"><span>Contour is not installed on this device.</span><button class="settings-button" data-act="setup">Manage device</button></div>':'';}
 function welcome(){return `<div class="body"><aside class="side"><div class="side-h">Profiles</div>${APP.profiles.filter(p=>p.channels===D().channels).map(p=>`<button class="mi" data-prof="${esc(p.id)}">${esc(p.name)}</button>`).join('')}<span class="grow"></span><button class="prim" data-act="new-profile">New profile</button></aside><main class="welcome"><h2>No profile selected</h2><p>Choose a profile or create one for ${esc(D().name)}.</p><button class="prim" data-act="new-profile">Create a profile</button></main></div>`;}
-let renderedProfile='';
+let renderedProfile='',renderedGate='';
+function editorAvailabilityKey(){
+  const gate=editorGate(),s=setupReports.get(APP?.device);
+  return gate?JSON.stringify([gate,s?.canInstall,s?.reason,s?.state,!!s?.busy]):'';
+}
+function updateEditorAvailability(){
+  if(S.view==='editor'&&editorAvailabilityKey()!==renderedGate)render();
+}
 function render(){
   if(!APP)return;document.documentElement.dataset.theme=S.theme;
   if(S.openEditorDevice===APP.device&&APP.closing?.state==='open'){S.openEditorDevice=null;S.view='editor';}
   if(layerDrag)cancelLayerDrag();
+  const gate=editorGate();renderedGate=editorAvailabilityKey();
+  if(S.view==='editor'&&gate){
+    if(S.pop!=='devices')S.pop=null;
+    if(APP.closing?.state==='open')S.modal=null;
+    S.tray=false;
+  }
   const key=APP.device+':'+P()?.id,keep=key===renderedProfile,layerScroll=keep?$('.layers')?.scrollTop||0:0,bandScroll=keep?$('#bands')?.scrollTop||0:0;
   renderedProfile=key;
-  $('#win').innerHTML='<div class="resize-top" data-resize="resize-top" aria-hidden="true"><i data-resize="resize-top-left"></i><i data-resize="resize-top-right"></i></div>'+titlebar()+(S.view==='settings'?settingsView():outputNotice()+(P()?editorView():welcome()))+'<div class="statusbar" id="statusbar" aria-label="Output status"></div>';
+  $('#win').innerHTML='<div class="resize-top" data-resize="resize-top" aria-hidden="true"><i data-resize="resize-top-left"></i><i data-resize="resize-top-right"></i></div>'+titlebar()+(S.view==='settings'?settingsView():gate?installationView(gate):P()?editorView():welcome())+(S.view==='editor'&&gate?'':'<div class="statusbar" id="statusbar" aria-label="Output status"></div>');
   if($('.layers'))$('.layers').scrollTop=layerScroll;if($('#bands'))$('#bands').scrollTop=bandScroll;
   // Add keyboard semantics to switches inherited from the approved drawing.
   $$('.sw:not(button)').forEach(el=>{el.role='switch';el.tabIndex=0;el.setAttribute('aria-checked',el.classList.contains('on'));el.setAttribute('aria-label','Enable filter');});
   bindGraph();statusbar();renderOver();draw();updateSettingsStatus();
+  ensureEditorCheck();
 }
 function popHtml(){
   const mi=(act,label,icon='',disabled=false)=>`<button class="mi" data-act="${act}" ${disabled?'disabled':''}><span class="ck">${icon?I(icon):''}</span>${label}</button>`;
@@ -340,9 +354,10 @@ document.addEventListener('click',async e=>{
   const layer=t.closest('[data-layer]');if(layer){S.sel=+layer.dataset.layer;S.band=0;render();return;}
   const band=t.closest('[data-band]');if(band&&!t.closest('.fld,button')){selectBand(+band.dataset.band);band.focus({preventScroll:true});return;}
   const act=t.closest('[data-act]')?.dataset.act;if(!act)return;
-  if(!['theme','status','setup','settings','back-eq','refresh-devices','retry-master','eq','new-profile'].includes(act)&&!P())return;
+  if(!['theme','status','setup','device-setup','settings','back-eq','refresh-devices','retry-master','eq','new-profile'].includes(act)&&!P())return;
   switch(act){
     case 'settings':case 'setup':openSetup();break;
+    case 'device-setup':openSettings('outputs',APP.device);break;
     case 'back-eq':if(!setupOperation){S.view='editor';S.pop=null;S.setupConfirm=null;render();}break;
     case 'refresh-devices':refreshDevices(true);break;
     case 'retry-master':command('eq',{enabled:APP.eqEnabled!==false},true);break;
@@ -387,7 +402,7 @@ if(window.chrome?.webview){
       const before=P()?.id,rate=P()?.curveRate,canAdopt=!pendingEdit&&!gesture&&replies.size===0;
       const rateChanged=canAdopt&&message.data.editor?.curveRate!==rate;
       adopt(message.data,canAdopt);statusbar();handleClose();
-      updateSettingsStatus();
+      updateEditorAvailability();updateSettingsStatus();
       if(before!==P()?.id||rateChanged)command('state',{},true);
     }
   });

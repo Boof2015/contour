@@ -31,6 +31,11 @@ async function main(){
   const changingPolicy=evaluate(`deviceDetails(APP.devices[2],{...setupReports.get(APP.device),enablesUnsignedAudio:true})`);
   assert.match(changingPolicy,/allow unsigned audio effects/,'Installation must explain its Windows audio change');
   assert.match(changingPolicy,/kept after removal/,'Installation must explain preservation for other APOs');
+  const unsupported={endpoint:ids[2],state:'blocked',installation:'not_installed',reason:'existing_effects',canInstall:false,canRemove:false};
+  context.unsupported=unsupported;
+  assert.equal(evaluate('installationLabel(unsupported)'),'Not installed');
+  assert.equal(evaluate('compatibilityLabel(APP.devices[2],unsupported)'),'Not supported yet');
+  assert.match(evaluate('deviceMessage(APP.devices[2],unsupported)'),/existing audio effects/);
   evaluate(`S.settingsDevice=APP.device;setupAct('install');setupAct('install');`);
   assert.equal(posts.length,0,'A mutation started concurrently with inspection');
   assert.equal(evaluate('pendingSetup.endpoint'),ids[2]);
