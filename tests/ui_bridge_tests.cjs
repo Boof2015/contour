@@ -99,8 +99,9 @@ async function main(){
 
   // Device inspection can target a row without switching the editor output.
   context.document.activeElement={blur(){}};
-  evaluate("S.settingsDevice='output';setupRequest('Inspect','output');");
+  evaluate("S.view='settings';S.settingsDevice='output';setupRequest('Inspect','output');");
   const inspectSetup=await take('setup');assert.equal(inspectSetup.action,'Inspect');assert.equal(inspectSetup.endpoint,'output');
+  evaluate("S.view='editor';");
   reply(inspectSetup,{endpoint:'output',state:'checking',busy:true});await turn();
   messageHandler({data:{event:'setup',data:{endpoint:'output',state:'available',busy:false,canInstall:true,canRemove:false}}});
   assert.ok(evaluate("deviceDetails(D(),setupReports.get('output'))").includes('Audio will briefly stop'));

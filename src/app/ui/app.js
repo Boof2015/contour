@@ -344,7 +344,7 @@ document.addEventListener('click',async e=>{
   switch(act){
     case 'settings':case 'setup':openSetup();break;
     case 'back-eq':if(!setupOperation){S.view='editor';S.pop=null;S.setupConfirm=null;render();}break;
-    case 'refresh-devices':refreshDevices();break;
+    case 'refresh-devices':refreshDevices(true);break;
     case 'retry-master':command('eq',{enabled:APP.eqEnabled!==false},true);break;
     case 'theme':S.theme=S.theme==='dark'?'light':'dark';localStorage.setItem('theme',S.theme);render();syncWindowTheme();break;
     case 'undo':undo();break;case 'redo':redo();break;
