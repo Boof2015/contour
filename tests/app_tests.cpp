@@ -3,12 +3,32 @@
 #include "test_support.h"
 #include <fstream>
 #include <iostream>
+#include <map>
 
 using namespace contour::app;
 using namespace contour::eq;
 using test::require;
 namespace {
 constexpr auto endpoint_id=L"desktop-test-output";
+class MultiEnumerator final : public control_test::RuntimeClass<control_test::RuntimeClassFlags<control_test::ClassicCom>,IMMDeviceEnumerator> {
+public:
+    std::map<std::wstring,Microsoft::WRL::ComPtr<IMMDevice>> devices;
+    std::vector<IMMNotificationClient*> observers;
+    HRESULT STDMETHODCALLTYPE EnumAudioEndpoints(EDataFlow,DWORD,IMMDeviceCollection**) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE GetDefaultAudioEndpoint(EDataFlow,ERole,IMMDevice**) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE GetDevice(LPCWSTR id,IMMDevice** device) override {
+        if (!device) { return E_POINTER; } *device=nullptr;
+        const auto it=devices.find(id?id:L""); return it==devices.end()?E_NOTFOUND:it->second.CopyTo(device);
+    }
+    HRESULT STDMETHODCALLTYPE RegisterEndpointNotificationCallback(IMMNotificationClient* observer) override {
+        if (!observer || std::find(observers.begin(),observers.end(),observer)!=observers.end()) { return E_INVALIDARG; }
+        observers.push_back(observer); return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE UnregisterEndpointNotificationCallback(IMMNotificationClient* observer) override {
+        const auto it=std::find(observers.begin(),observers.end(),observer); if(it==observers.end())return E_INVALIDARG;
+        observers.erase(it); return S_OK;
+    }
+};
 struct Fixture {
     Microsoft::WRL::ComPtr<control_test::Store> live=Microsoft::WRL::Make<control_test::Store>();
     Microsoft::WRL::ComPtr<control_test::Store> saved=Microsoft::WRL::Make<control_test::Store>();
@@ -27,11 +47,17 @@ struct Fixture {
         model=std::make_unique<Model>(file,std::vector<Device>{{endpoint_id,"Fixture output",2,48000,3,true}},enumerator.Get());
     }
     void publish_status(){write_control_value(*live.Get(),preview_status_key,encode_status(processor->poll()));}
-    void consume(){
+    void idle(){auto status=processor->poll();status.heartbeat_ms=0;write_control_value(*live.Get(),preview_status_key,encode_status(status));model->poll();}
+    void output_is(double gain){
+        std::vector<float> samples(4000,.25F);audio.process(samples.data(),samples.data(),2000);
+        test::expect_near(samples.back(),.25*std::pow(10.,gain/20.),"Resumed audio did not use the latest requested EQ");
+    }
+    void process_request(){
         const auto request=read_control_value(*live.Get(),preview_request_key,max_request_bytes);
         if(request)processor->submit(*request);
-        std::vector<float> buffer(4000,0.1F); audio.process(buffer.data(),buffer.data(),2000); publish_status();model->poll();
+        std::vector<float> buffer(4000,0.1F); audio.process(buffer.data(),buffer.data(),2000); publish_status();
     }
+    void consume(){process_request();model->poll();}
     Json work(){return model->state()["editor"]["work"];}
     Json edit(Json value){return model->dispatch({{"op","edit"},{"work",std::move(value)}});}
 };
@@ -104,8 +130,142 @@ void profile_guard(const std::filesystem::path& path){
     bool rejected=false;try{f.model->dispatch({{"op","execute"},{"path","anything"}});}catch(const std::exception&){rejected=true;}
     require(rejected,"Unknown bridge operation accepted");
 }
+std::string bytes(const std::filesystem::path& path){
+    std::ifstream in(path,std::ios::binary); return {std::istreambuf_iterator<char>(in),std::istreambuf_iterator<char>()};
+}
+void master_eq(const std::filesystem::path& path){
+    Fixture f(path);
+    auto work=f.work();work["layers"][0]["gain"]=-6;f.edit(work);f.consume();
+    f.model->dispatch({{"op","save"}});f.consume();
+    const auto before=f.model->state();const auto library=bytes(path);
+    auto off=f.model->dispatch({{"op","eq"},{"enabled",false}});f.consume();
+    require(!off["eqEnabled"].get<bool>()&&!off["editor"]["dirty"].get<bool>(),"Master toggle dirtied the profile");
+    require(off["editor"]["revision"]==before["editor"]["revision"]&&off["editor"]["undo"]==before["editor"]["undo"],"Master toggle entered edit history");
+    require(bytes(path)==library,"Master toggle rewrote the profile library");
+    require(read_saved_profile(*f.saved.Get())->configuration.bypass,"Disabled EQ was not persisted for audio restart");
+    std::vector<float> samples(4000,.25F);f.audio.process(samples.data(),samples.data(),2000);
+    test::expect_near(samples.back(),.25,"Master bypass did not reach actual DSP");
+    work=f.work();work["layers"][0]["gain"]=-12;f.edit(work);f.consume();
+    require(f.model->state()["editor"]["dirty"].get<bool>(),"Draft edit disappeared while bypassed");
+    auto undo=f.model->dispatch({{"op","undo"}});f.consume();
+    require(!undo["eqEnabled"].get<bool>()&&undo["editor"]["work"]["layers"][0]["gain"]==-6,"Undo changed the master setting");
+    auto copy=f.model->dispatch({{"op","duplicate"},{"name","Master test copy"}});
+    f.model->dispatch({{"op","select"},{"id",copy["profiles"][1]["id"]}});f.consume();
+    require(!f.model->state()["eqEnabled"].get<bool>()&&read_saved_profile(*f.saved.Get())->configuration.bypass,"Selecting a profile re-enabled EQ");
+    f.model->dispatch({{"op","revert"}});f.model->dispatch({{"op","save"}});f.consume();
+    { ProfileLibrary check(path);for(const auto& entry:check.entries())require(!entry.saved.configuration.bypass,"Master bypass leaked into a saved profile"); }
+    const auto writes=f.saved->writes;
+    f.model.reset();f.model=std::make_unique<Model>(path,std::vector<Device>{{endpoint_id,"Fixture output",2,48000,3,true}},f.enumerator.Get());
+    require(!f.model->state()["eqEnabled"].get<bool>()&&f.saved->writes==writes,"Restart lost master state or implicitly wrote EQ");
+    const auto draft=f.model->state()["editor"];
+    f.model->dispatch({{"op","eq"},{"enabled",true}});f.consume();
+    require(f.model->state()["editor"]["work"]==draft["work"]&&!f.model->state()["editor"]["dirty"].get<bool>(),"Re-enabling changed the profile");
+    samples.assign(4000,.25F);f.audio.process(samples.data(),samples.data(),2000);
+    test::expect_near(samples.back(),.25*std::pow(10.,-6./20.),"Re-enabling did not restore saved EQ");
+    // No active stream: persist the global choice for the next audio startup.
+    f.idle();
+    f.model->dispatch({{"op","eq"},{"enabled",false}});
+    require(read_saved_profile(*f.saved.Get())->configuration.bypass,"Idle master state did not persist");
+    require(!f.model->state()["editor"]["dirty"].get<bool>(),"Idle toggle dirtied the profile");
+    // The same runtime can resume with its old bank still loaded. No second
+    // toggle, Save or explicit retry may be needed to finish the request.
+    f.publish_status();f.model->poll();f.consume();f.output_is(0);
+    require(f.model->state()["status"]["applied"].get<bool>(),"Resumed bypass was not acknowledged");
+}
+void idle_edits(const std::filesystem::path& path){
+    Fixture f(path);f.idle();
+    auto work=f.work();work["layers"][0]["gain"]=-3;f.edit(work);
+    work["layers"][0]["gain"]=-9;f.edit(work);
+    require(read_saved_profile(*f.saved.Get())->configuration.layers[0].gain_db==0,"Idle draft overwrote the saved checkpoint");
+    f.publish_status();f.model->poll();f.consume();f.output_is(-9);
+    require(f.model->state()["editor"]["dirty"].get<bool>(),"Automatic delivery saved a draft");
+    f.idle();auto state=f.model->dispatch({{"op","save"}});
+    require(state["status"]["copy"]=="current"&&!state["status"]["applied"].get<bool>(),"Idle Save requires audio or invents an acknowledgement");
+    require(read_saved_profile(*f.saved.Get())->configuration.layers[0].gain_db==-9,"Idle Save did not reach Windows");
+    // Close must give the connection check a chance to finish, then publish
+    // its final target without a manual retry when the runtime returns.
+    state=f.model->dispatch({{"op","close"}});
+    require(state["closing"]["state"]=="waiting","Idle close failed before its connection check");
+    f.publish_status();f.model->poll();f.consume();f.output_is(-9);
+    require(f.model->closed(),"Idle close did not finish after the resumed audio acknowledgement");
+}
+void master_devices(const std::filesystem::path& path){
+    Fixture first(path),second(path.wstring()+L".second"),unassigned(path.wstring()+L".unassigned");
+    first.model.reset();second.model.reset();unassigned.model.reset();
+    const auto enumerator=Microsoft::WRL::Make<MultiEnumerator>();
+    enumerator->devices={{endpoint_id,first.endpoint},{L"second-output",second.endpoint},{L"unassigned-output",unassigned.endpoint}};
+    { ProfileLibrary library(path);ProfileWorkspace second_assignment(library,L"second-output");second_assignment.select(library.entries().front().id); }
+    const auto library=bytes(path);
+    const std::vector<Device> devices={{endpoint_id,"First",2,48000,3,true},{L"second-output","Second",2,48000,3,true},{L"unassigned-output","Unassigned",2,48000,3,true}};
+    Model model(path,devices,enumerator.Get());
+    auto work=model.state()["editor"]["work"];work["layers"][0]["gain"]=-7;
+    model.dispatch({{"op","edit"},{"work",work}});
+    const auto draft=model.state()["editor"];
+    auto state=model.dispatch({{"op","eq"},{"enabled",false}});
+    require(state["masterIssues"].empty(),"Multiple-device toggle reported a failure");
+    for(auto* f:{&first,&second,&unassigned}){
+        require(read_saved_profile(*f->saved.Get())->configuration.bypass,"Global toggle missed an output's saved EQ");
+        const auto request=read_control_value(*f->live.Get(),preview_request_key,max_request_bytes);
+        require(request && parse_profile(decode_request(*request).profile).configuration.bypass,"Global toggle missed an output's live EQ");
+    }
+    require(state["editor"]["work"]==draft["work"]&&state["editor"]["revision"]==draft["revision"]&&state["editor"]["dirty"].get<bool>(),"Global toggle replaced the active draft");
+    require(bytes(path)==library,"Global toggle changed library assignments or profiles");
+    second.saved->write_result=E_ACCESSDENIED;
+    state=model.dispatch({{"op","eq"},{"enabled",true}});
+    require(state["eqEnabled"].get<bool>()&&state["masterIssues"].size()==1&&state["masterIssues"][0]["device"]=="second-output","Partial device failure was hidden or lost master intent");
+    require(!read_saved_profile(*first.saved.Get())->configuration.bypass&&!read_saved_profile(*unassigned.saved.Get())->configuration.bypass,"One failure prevented other devices updating");
+    second.saved->write_result=S_OK;
+    state=model.dispatch({{"op","eq"},{"enabled",true}});
+    require(state["masterIssues"].empty()&&!read_saved_profile(*second.saved.Get())->configuration.bypass,"Retry did not complete the pending master change");
+    // All outputs go idle, including an installed device without a profile
+    // assignment. Retain every delivery until its own runtime acknowledges.
+    for(auto* f:{&first,&second,&unassigned}) {
+        auto status=f->processor->poll();status.heartbeat_ms=0;
+        write_control_value(*f->live.Get(),preview_status_key,encode_status(status));
+    }
+    model.dispatch({{"op","eq"},{"enabled",false}});
+    for(auto* f:{&first,&second,&unassigned})f->publish_status();
+    model.poll();
+    for(auto* f:{&first,&second,&unassigned}) {
+        const auto request=read_control_value(*f->live.Get(),preview_request_key,max_request_bytes);
+        require(request&&parse_profile(decode_request(*request).profile).configuration.bypass,"Idle global toggle missed a resumed output");
+    }
+    state=model.dispatch({{"op","close"},{"choice","save"}});
+    require(state["closing"]["state"]=="waiting"&&!model.closed(),"Close abandoned another output's pending EQ");
+    for(int pass=0;pass<3&&!model.closed();++pass) {
+        for(auto* f:{&first,&second,&unassigned})f->process_request();
+        model.poll();
+    }
+    require(model.closed(),"Close did not complete after all output acknowledgements");
+    for(auto* f:{&first,&second,&unassigned})f->output_is(0);
+}
 }
 int wmain(int argc,wchar_t** argv){
+    // Explicit manual integration check; never part of automated CTest. It
+    // only opens the requested device silently and reads existing settings.
+    if(argc==3&&std::wstring_view(argv[1])==L"--check-connection") {
+        if(FAILED(CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED)))return 2;
+        int result=1;
+        try {
+            Microsoft::WRL::ComPtr<IMMDeviceEnumerator> enumerator;
+            require(SUCCEEDED(CoCreateInstance(__uuidof(MMDeviceEnumerator),nullptr,CLSCTX_ALL,IID_PPV_ARGS(&enumerator))),"Enumerate devices");
+            Microsoft::WRL::ComPtr<IMMDevice> device;require(SUCCEEDED(enumerator->GetDevice(argv[2],&device)),"Find device");
+            Microsoft::WRL::ComPtr<IPropertyStore> saved;require(SUCCEEDED(open_saved_store(device.Get(),STGM_READ,&saved)),"Read saved EQ");
+            const auto before=read_saved_profile(*saved.Get());saved.Reset();
+            {
+                AudioConnection connection;connection.request(argv[2],true);
+                const auto until=GetTickCount64()+5000;
+                while(connection.status(argv[2]).busy&&GetTickCount64()<until)Sleep(20);
+                const auto check=connection.status(argv[2]);
+                std::cout<<Json{{"confirmed",check.confirmed},{"busy",check.busy},{"detail",check.detail}}.dump()<<'\n';
+                require(check.confirmed&&!check.busy,"No fresh Contour response to silent shared stream");
+            }
+            require(SUCCEEDED(open_saved_store(device.Get(),STGM_READ,&saved)),"Recheck saved EQ");
+            require(read_saved_profile(*saved.Get())==before,"Silent check changed saved EQ");
+            std::cout<<"PASS silent connection released; saved EQ unchanged\n";result=0;
+        } catch(const std::exception& e) {std::cerr<<e.what()<<'\n';}
+        CoUninitialize();return result;
+    }
     if(argc==2 && std::wstring_view(argv[1])==L"--curve-fixtures") {
         Json fixtures=Json::array();
         for(const double rate:{8000.,44100.,48000.,96000.,192000.,384000.})
@@ -127,5 +287,8 @@ int wmain(int argc,wchar_t** argv){
     suite.run("native REW import, independent channels, native graph coefficients and audio",[&]{import_and_curves(dir/L"import.library");});
     suite.run("offline editing, durable partial Save and guarded exit",[&]{offline_and_exit(dir/L"offline.library");});
     suite.run("profile switch decisions, duplicate and strict bridge allowlist",[&]{profile_guard(dir/L"profiles.library");});
+    suite.run("global EQ bypass preserves profiles/history and survives selection, save, restart and audio idle",[&]{master_eq(dir/L"master.library");});
+    suite.run("idle edits coalesce, Save persists without playback, and close delivers automatically on resume",[&]{idle_edits(dir/L"idle.library");});
+    suite.run("global EQ reaches assigned and unassigned outputs, preserves drafts and reports retryable partial failure",[&]{master_devices(dir/L"master-devices.library");});
     const auto result=suite.finish();CoUninitialize();return result;
 }

@@ -43,7 +43,8 @@ struct ProfileCloseStatus {
 // library without applying it. Cross-device propagation is not implicit.
 class ProfileDeviceSession final {
 public:
-    ProfileDeviceSession(ProfileLibrary& library,std::wstring endpoint_id,IMMDeviceEnumerator* enumerator=nullptr);
+    ProfileDeviceSession(ProfileLibrary& library,std::wstring endpoint_id,IMMDeviceEnumerator* enumerator=nullptr,
+                         std::optional<bool> bypass_override={});
     ~ProfileDeviceSession();
     ProfileDeviceSession(const ProfileDeviceSession&)=delete;
     ProfileDeviceSession& operator=(const ProfileDeviceSession&)=delete;
@@ -67,12 +68,20 @@ public:
     void rename(std::string name);
     // Edits/undo remain on current()->editor(); preview auditions the working
     // draft without saving. Synchronize explicitly retries the saved device
-    // copy, then previews the current draft; refresh/reconnect never retry it.
+    // copy, then previews the current draft. deliver_pending completes this
+    // explicit intent after reconnect; refresh alone never retries it.
     const ProfileDeviceStatus& preview();
     const ProfileDeviceStatus& synchronize();
+    const ProfileDeviceStatus& set_bypass_override(bool bypass);
+    // Complete an explicitly requested change when its runtime becomes ready.
+    // Read-only refresh/reconcile still never publish. No startup intent is
+    // inferred merely from opening a saved profile.
+    const ProfileDeviceStatus& deliver_pending();
+    bool needs_connection() const noexcept { return wake_requested_; }
     // Nonblocking exit handshake. Save commits the library first; Don't save
     // retains the draft until finish_close while a separate editor restores
-    // the checkpoint. Poll never retries writes or closes the editor itself.
+    // the checkpoint. Poll can submit that target to a newly connected runtime;
+    // it never retries failed persistence or closes the editor itself.
     static constexpr std::uint64_t close_timeout_ms=2000;
     const ProfileCloseStatus& close_status() const noexcept { return close_status_; }
     const ProfileCloseStatus& request_close(std::optional<UnsavedChoice> choice={});
@@ -99,6 +108,8 @@ private:
     const ProfileDeviceStatus& synchronize_current();
     void bind();
     void pending();
+    Profile processing(Profile profile) const;
+    std::optional<bool> bypass_override_;
     ProfileWorkspace workspace_;
     std::wstring endpoint_id_;
     Microsoft::WRL::ComPtr<IMMDeviceEnumerator> enumerator_;
@@ -111,6 +122,8 @@ private:
     std::uint64_t copied_generation_=0;
     ProfileDeviceStatus status_;
     bool device_touched_=false;
+    bool delivery_requested_=false,wake_requested_=false;
+    std::uint64_t last_delivery_=0;
     std::optional<CloseAttempt> closing_;
     ProfileCloseStatus close_status_;
 };

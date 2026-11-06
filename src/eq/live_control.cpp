@@ -212,7 +212,8 @@ const PreviewStatus& PreviewProcessor::stop() noexcept {
     status_.state=PreviewState::stopped; status_.heartbeat_ms=GetTickCount64(); return status_;
 }
 
-LivePreview::LivePreview(EditSession& editor, IPropertyStore* store) : editor_(editor),store_(store) {
+LivePreview::LivePreview(EditSession& editor, IPropertyStore* store, std::optional<bool> bypass_override)
+    : editor_(editor),bypass_override_(bypass_override),store_(store) {
     check(store!=nullptr,"Missing preview property store");
 }
 std::optional<PreviewStatus> LivePreview::read_status() {
@@ -232,7 +233,9 @@ void LivePreview::submit() {
         check(runtime_id_!=GUID_NULL && status && status->runtime==runtime_id_ && status_is_live(*status,GetTickCount64()),
               "Audio runtime changed or stopped; reconnect before previewing");
         const auto snapshot=editor_.snapshot();
-        const auto bytes=encode_request({runtime_id_,session_id_,snapshot->revision(),serialize_profile(snapshot->profile())});
+        auto processing=snapshot->profile();
+        if (bypass_override_) { processing.configuration.bypass=*bypass_override_; }
+        const auto bytes=encode_request({runtime_id_,session_id_,snapshot->revision(),serialize_profile(processing)});
         write_control_value(*store_.Get(),preview_request_key,bytes); pending_=snapshot;
     } catch (...) { disconnect(); throw; }
 }

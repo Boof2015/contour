@@ -1,4 +1,5 @@
 #include "model.h"
+#include "setup.h"
 #include <WebView2.h>
 #include <wrl.h>
 #include <shlobj.h>
@@ -18,6 +19,7 @@ constexpr UINT start_frame_drag=WM_APP+1,open_system_menu=WM_APP+2;
 struct App {
     HWND window=nullptr;
     std::unique_ptr<contour::app::Model> model;
+    std::unique_ptr<contour::app::DeviceSetup> setup;
     ComPtr<ICoreWebView2Controller> controller;
     ComPtr<ICoreWebView2> view;
     std::filesystem::path assets,data;
@@ -53,15 +55,15 @@ struct App {
         MessageBoxW(window,contour::app::wide(error).c_str(),L"Contour",MB_OK|MB_ICONERROR);
     }
     void message(ICoreWebView2WebMessageReceivedEventArgs* args) noexcept {
-        Json id=nullptr;
+        Json request_id=nullptr;
         try {
             wchar_t* source=nullptr; if (FAILED(args->get_Source(&source))) { return; }
             const bool trusted=source && std::wstring_view(source)==page; CoTaskMemFree(source); if (!trusted) { return; }
             wchar_t* raw=nullptr; if (FAILED(args->TryGetWebMessageAsString(&raw))) { return; }
             std::wstring body=raw ? raw : L""; CoTaskMemFree(raw);
             if (body.size()>2*1024*1024) { throw std::invalid_argument("Editor message is too large"); }
-            const auto request=Json::parse(contour::app::utf8(body)); id=request.at("id");
-            if (!id.is_number_unsigned()) { throw std::invalid_argument("Invalid request identity"); }
+            const auto request=Json::parse(contour::app::utf8(body)); request_id=request.at("requestId");
+            if (!request_id.is_number_unsigned()) { throw std::invalid_argument("Invalid request identity"); }
             if (request.at("op")=="window") {
                 const auto action=request.at("action").get<std::string>();
                 if (action=="minimize") { ShowWindow(window,SW_MINIMIZE); }
@@ -100,14 +102,28 @@ struct App {
                     PostMessageW(window,open_system_menu,0,MAKELPARAM(cursor.x,cursor.y));
                 }
                 else { throw std::invalid_argument("Unknown window action"); }
-                send({{"id",id},{"ok",true},{"data",window_state()}}); return;
+                send({{"requestId",request_id},{"ok",true},{"data",window_state()}}); return;
+            }
+            if (request.at("op")=="setup") {
+                if (model->state(false)["closing"]["state"]!="open") { throw std::runtime_error("Finish or cancel closing before device setup"); }
+                const auto endpoint=contour::app::wide(request.at("endpoint").get<std::string>());
+                const auto* device=model->find_device(endpoint);
+                if (!device) { throw std::invalid_argument("This device is no longer in the device list. Refresh the list and try again"); }
+                const auto action=request.at("action").get<std::string>();
+                if (action=="Install" && !device->available) { throw std::runtime_error("Connect this device before installing Contour"); }
+                const auto result=setup->request(window,device->id,action);
+                model->suspend_connections(setup->mutating());
+                send({{"requestId",request_id},{"ok",true},{"data",result}}); return;
+            }
+            if (setup->mutating() && request.at("op")!="state" && request.at("op")!="inspect") {
+                throw std::runtime_error("Wait for installation or removal to finish");
             }
             auto result=model->dispatch(request); ready=true;
-            send({{"id",id},{"ok",true},{"data",std::move(result)}});
+            send({{"requestId",request_id},{"ok",true},{"data",std::move(result)}});
             if (request.at("op")=="state") { send_window_state(true); }
             if (model->closed()) { DestroyWindow(window); }
         } catch (const std::exception& e) {
-            try { send({{"id",id},{"ok",false},{"error",e.what()},{"state",model->state()}}); } catch (...) {}
+            try { send({{"requestId",request_id},{"ok",false},{"error",e.what()},{"state",model->state()}}); } catch (...) {}
         }
     }
     void initialize() {
@@ -225,12 +241,21 @@ LRESULT CALLBACK window_proc(HWND window,UINT message,WPARAM w,LPARAM l) {
         SetWindowPos(window,nullptr,rect->left,rect->top,rect->right-rect->left,rect->bottom-rect->top,SWP_NOZORDER|SWP_NOACTIVATE); return 0;
     }
     case WM_TIMER:
+        if (app->setup->poll() && app->ready) {
+            const auto& report=app->setup->state();
+            app->model->suspend_connections(app->setup->mutating());
+            if(!report.value("busy",false) && report.value("state",std::string{})=="attached") {
+                app->model->check_connection(contour::app::wide(report.at("endpoint").get<std::string>()));
+            }
+            app->send({{"event","setup"},{"data",report}});
+        }
         if (app->ready) {
             try { app->model->poll(); app->send({{"event","status"},{"data",app->model->state(false)}}); if (app->model->closed()) { DestroyWindow(window); } }
             catch (const std::exception& e) { app->send({{"event","error"},{"error",e.what()}}); }
         }
         return 0;
     case WM_CLOSE:
+        if (app->setup->mutating()) { app->fail("Wait for installation or removal to finish before closing Contour."); return 0; }
         if (app->ready) { app->send({{"event","close"}}); }
         else {
             // WebView failure must not bypass the same draft/save guarantees.
@@ -263,6 +288,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int show) {
         App app;
         wchar_t executable[32768]{}; GetModuleFileNameW(nullptr,executable,32768);
         app.assets=std::filesystem::path(executable).parent_path()/L"ui";
+        app.setup=std::make_unique<contour::app::DeviceSetup>(std::filesystem::path(executable).parent_path());
         wchar_t* local=nullptr;
         if (FAILED(SHGetKnownFolderPath(FOLDERID_LocalAppData,0,nullptr,&local))) { throw std::runtime_error("Cannot find local application storage"); }
         app.data=std::filesystem::path(local)/L"Contour"; CoTaskMemFree(local);

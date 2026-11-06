@@ -13,19 +13,37 @@ const context=vm.createContext({setTimeout,clearTimeout,console,requestAnimation
 const evaluate=s=>vm.runInContext(s,context);
 const copy=o=>JSON.parse(JSON.stringify(o));
 const turn=()=>new Promise(r=>setImmediate(r));
-let state={device:'output',devices:[{id:'output',name:'Output',channels:2,rate:48000,mask:3}],profiles:[],closing:{state:'open'},status:{endpoint:'not_attached'},
+let state={device:'output',devices:[{id:'output',name:'Output',channels:2,rate:48000,mask:3,available:true}],profiles:[],closing:{state:'open'},status:{endpoint:'not_attached'},
   editor:{id:'profile',name:'Profile',channels:2,rate:48000,curveRate:48000,revision:1,dirty:false,undo:false,redo:false,work:{bypass:false,layers:[{name:'Layer',all:true,mask:0,gain:0,on:true,filters:[]}]}}};
-function reply(request,data=state){messageHandler({data:{id:request.id,ok:true,data:copy(data)}});}
+function reply(request,data=state){messageHandler({data:{requestId:request.requestId,ok:true,data:copy(data)}});}
 async function take(op){await turn();const request=posts.shift();assert.equal(request?.op,op);return request;}
 async function main(){
   // Compiling all files together also catches duplicate global bindings that
   // separate syntax checks miss in classic scripts loaded by index.html.
-  const scripts=['editor.js','app.js','interactions.js'].map(f=>fs.readFileSync(path.join(directory,f),'utf8')).join('\n');
+  const scripts=['editor.js','settings.js','app.js','interactions.js'].map(f=>fs.readFileSync(path.join(directory,f),'utf8')).join('\n');
   new vm.Script(scripts).runInContext(context);
   evaluate('render=()=>{}; refresh=()=>{}; refreshChrome=()=>{}; statusbar=()=>{}; renderOver=()=>{}; toast=()=>{};');
   reply(await take('state'));await turn();
   const theme=await take('window');assert.equal(theme.action,'theme');assert.equal(theme.theme,'dark');
   reply(theme,{custom:true,maximized:false});await turn();
+
+  // Entity IDs must not overwrite the bridge's numeric reply identity. A lost
+  // reply here used to strand every later command, including window Close.
+  evaluate("switchProfile('profile');");
+  const selected=await take('select');
+  assert.ok(Number.isSafeInteger(selected.requestId),'Profile selection overwrote the request identity');
+  assert.equal(selected.id,'profile');reply(selected);await turn();
+  evaluate("command('device',{id:'output'},true);");
+  const chosenOutput=await take('device');
+  assert.ok(Number.isSafeInteger(chosenOutput.requestId),'Output selection overwrote the request identity');
+  assert.equal(chosenOutput.id,'output');reply(chosenOutput);await turn();
+  evaluate("command('select',{id:'missing-profile'},true);");
+  const rejected=await take('select');
+  messageHandler({data:{requestId:rejected.requestId,ok:false,error:'Unknown profile',state:copy(state)}});
+  await turn();
+  evaluate("rpc('window',{action:'close'});");
+  const stillResponsive=await take('window');assert.equal(stillResponsive.action,'close');
+  reply(stillResponsive,{custom:true,maximized:false});await turn();
 
   // A resize burst should schedule one graph paint and must not repeatedly
   // destroy the caption DOM (including focused window controls).
@@ -79,6 +97,45 @@ async function main(){
   state.editor.work=finalEdit.work;reply(finalEdit);reply(await take('close'));await turn();
   assert.equal(posts.length,0);
 
+  // Device inspection can target a row without switching the editor output.
+  context.document.activeElement={blur(){}};
+  evaluate("S.settingsDevice='output';setupRequest('Inspect','output');");
+  const inspectSetup=await take('setup');assert.equal(inspectSetup.action,'Inspect');assert.equal(inspectSetup.endpoint,'output');
+  reply(inspectSetup,{endpoint:'output',state:'checking',busy:true});await turn();
+  messageHandler({data:{event:'setup',data:{endpoint:'output',state:'available',busy:false,canInstall:true,canRemove:false}}});
+  assert.ok(evaluate("deviceDetails(D(),setupReports.get('output'))").includes('Audio will briefly stop'));
+  evaluate("setupAct('install');setupAct('install');");
+  const installSetup=await take('setup');assert.equal(installSetup.action,'Install');assert.equal(installSetup.endpoint,'output');
+  assert.equal(posts.length,0,'Repeated click started a second installation');
+  assert.equal(evaluate('S.setupConfirm'),null,'Install added another confirmation');
+  reply(installSetup,{endpoint:'output',state:'installing',busy:true});await turn();
+  state.eqEnabled=false;evaluate('APP.eqEnabled=false;');
+  messageHandler({data:{event:'setup',data:{endpoint:'output',state:'attached',busy:false,canInstall:false,canRemove:true}}});
+  await new Promise(resolve=>setTimeout(resolve,5));
+  const masterAfterInstall=await take('eq');assert.equal(masterAfterInstall.enabled,false,'Installation re-enabled globally bypassed EQ');reply(masterAfterInstall);await turn();
+  assert.ok(evaluate("deviceMessage(D(),setupReports.get('output'))").includes('no playback is needed'),'Installed still asks the user to play audio');
+  evaluate("APP.devices[0].connection={confirmed:true};");
+  assert.equal(evaluate("statusSummary({endpoint:'waiting_for_audio'},P(),false).label"),'EQ bypassed');
+  assert.equal(evaluate("compatibilityLabel(D(),setupReports.get('output'))"),'Confirmed');
+  evaluate("APP.devices[0].connection={confirmed:false,detail:'Cannot connect'};");
+  assert.equal(evaluate("statusSummary({endpoint:'waiting_for_audio'},P(),false).label"),'Check connection');
+  assert.ok(evaluate("deviceMessage(D(),setupReports.get('output'))").includes('could not connect'));
+  evaluate("APP.devices[0].connection={confirmed:false,checking:true};");
+  assert.equal(evaluate("statusSummary({endpoint:'waiting_for_audio',pending:true},P(),false).label"),'Connecting');
+  evaluate("setupAct('uninstall');");assert.equal(posts.length,0,'Uninstall skipped review');
+  assert.ok(evaluate("deviceDetails(D(),setupReports.get('output'))").includes('Uninstall Contour from this device?'));
+  evaluate("setupAct('cancel');");assert.equal(evaluate('S.setupConfirm'),null);
+  evaluate("setupAct('uninstall');setupAct('confirm');");
+  const removeSetup=await take('setup');assert.equal(removeSetup.action,'Remove');
+  assert.equal(evaluate('S.setupConfirm'),null,'Removal kept its completed confirmation');
+  reply(removeSetup,{endpoint:'output',state:'removing',busy:true});await turn();
+  messageHandler({data:{event:'setup',data:{endpoint:'output',state:'checking',busy:true,canInstall:false,canRemove:false}}});
+  assert.equal(evaluate("installationLabel(setupReports.get('output'))"),'Uninstalling…','Verification interrupted the uninstall status');
+  assert.ok(!evaluate("deviceDetails(D(),setupReports.get('output'))").includes('data-setup-act='),'Verification restored device actions');
+  messageHandler({data:{event:'setup',data:{endpoint:'output',state:'available',busy:false,canInstall:true,canRemove:false}}});
+  assert.equal(evaluate('setupOperation'),null,'Removal never finished');
+  assert.ok(evaluate("deviceDetails(D(),setupReports.get('output'))").includes('data-setup-act="install"'),'Completed removal did not restore Install');
+
   // Continuous input must publish before it stops, and a slow host must not
   // accumulate a queue of obsolete parameter snapshots.
   const interval=setInterval(()=>evaluate('P().work.layers[0].gain-=.1; queueEdit();'),5);
@@ -97,6 +154,6 @@ async function main(){
   evaluate("layerAction(1,'trash');");assert.equal(evaluate('L().name'),'B');
   evaluate("layerAction(0,'trash');");assert.equal(evaluate('L().name'),'C');
   evaluate("layerAction(0,'trash');");assert.equal(evaluate('LAYERS().length'),0);
-  console.log('PASS scripts load; resize coalescing/caption stability/cache bounds; units; stale replies; Save/close ordering; continuous preview; sidebar selection');
+  console.log('PASS scripts load; profile/output reply identity and rejected-command recovery; resize coalescing/caption stability/cache bounds; units; stale replies; Save/close ordering; setup lifecycle; continuous preview; sidebar selection');
 }
-main().catch(e=>{console.error(e);process.exitCode=1;});
+main().catch(e=>{console.error(e);process.exit(1);});

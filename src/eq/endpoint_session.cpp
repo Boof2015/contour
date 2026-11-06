@@ -48,6 +48,11 @@ struct EndpointSession::Impl {
     double validated_rate=0;
     std::uint32_t validated_channels=0;
     std::string validation_error;
+    std::optional<bool> bypass_override;
+    Profile processing(Profile value) const {
+        if (bypass_override) { value.configuration.bypass=*bypass_override; }
+        return value;
+    }
 
     Impl(EditSession& value,std::wstring endpoint,IMMDeviceEnumerator* supplied)
         : editor(&value),id(std::move(endpoint)),enumerator(supplied) {
@@ -81,7 +86,7 @@ struct EndpointSession::Impl {
             validation_error.clear();
             try {
                 require(editor->working().channels==runtime.channels,"Profile channel count does not match this device; explicit mapping is required");
-                ParametricEq check; check.configure(editor->working().configuration,runtime.sample_rate,runtime.channels);
+                ParametricEq check; check.configure(processing(editor->working()).configuration,runtime.sample_rate,runtime.channels);
             } catch (const std::exception& e) { validation_error=e.what(); }
         }
         return validation_error.empty();
@@ -118,7 +123,7 @@ struct EndpointSession::Impl {
             status.state=EndpointState::incompatible; status.preview=PreviewFeedback::disconnected; status.detail=validation_error; return;
         }
         if (!client) {
-            auto next=std::make_unique<LivePreview>(*editor,store.Get());
+            auto next=std::make_unique<LivePreview>(*editor,store.Get(),bypass_override);
             const auto connected=next->connect();
             require(connected.runtime==runtime->runtime && connected.sample_rate==runtime->sample_rate && connected.channels==runtime->channels,
                     "Audio runtime changed while reconnecting; refresh again");
@@ -180,6 +185,11 @@ void EndpointSession::preview() {
         s.status.preview=PreviewFeedback::waiting;
     } catch (const std::exception& e) { s.drop(); s.status.state=EndpointState::error; s.status.preview=PreviewFeedback::disconnected; s.status.detail=e.what(); throw; }
 }
+void EndpointSession::set_bypass_override(std::optional<bool> bypass) noexcept {
+    auto& s=*impl_;
+    if (s.bypass_override==bypass) { return; }
+    s.bypass_override=bypass; s.drop(); s.validated.reset();
+}
 void EndpointSession::save() {
     impl_->editor->save_with([&](const Profile& profile) { persist(profile); });
 }
@@ -190,12 +200,21 @@ EndpointCopyReceipt EndpointSession::persist(const Profile& profile) {
     try {
         validate_profile(profile);
         require(s.status.runtime && profile.channels==s.status.runtime->channels,"Saved profile channel count does not match this device; explicit mapping is required");
-        ParametricEq check; check.configure(profile.configuration,s.status.runtime->sample_rate,s.status.runtime->channels);
+        const auto processing=s.processing(profile);
+        ParametricEq check; check.configure(processing.configuration,s.status.runtime->sample_rate,s.status.runtime->channels);
         ComPtr<IMMDevice> endpoint; hr(s.enumerator->GetDevice(s.id.c_str(),&endpoint),"Reopen selected endpoint");
         ComPtr<IPropertyStore> saved; hr(open_saved_store(endpoint.Get(),STGM_READWRITE,&saved),"Open selected endpoint saved settings");
-        s.ensure_current(); write_saved_profile(*saved.Get(),profile); s.ensure_current();
+        s.ensure_current(); write_saved_profile(*saved.Get(),processing); s.ensure_current();
         return {s.status.runtime->runtime,s.generation};
     } catch (const std::exception& e) { s.drop(); s.status.state=EndpointState::error; s.status.preview=PreviewFeedback::disconnected; s.status.detail=e.what(); throw; }
+}
+void EndpointSession::persist_inactive(const Profile& profile) {
+    auto& s=*impl_; const auto generation=s.notifications->generation.load(std::memory_order_acquire);
+    validate_profile(profile);
+    ComPtr<IMMDevice> endpoint; hr(s.enumerator->GetDevice(s.id.c_str(),&endpoint),"Find device for saved EQ");
+    ComPtr<IPropertyStore> saved; hr(open_saved_store(endpoint.Get(),STGM_READWRITE,&saved),"Open device saved settings");
+    write_saved_profile(*saved.Get(),s.processing(profile));
+    require(s.notifications->generation.load(std::memory_order_acquire)==generation,"Device changed while saving EQ");
 }
 EndpointSavedSnapshot EndpointSession::inspect_saved() {
     auto& s=*impl_; const auto generation=s.notifications->generation.load(std::memory_order_acquire);

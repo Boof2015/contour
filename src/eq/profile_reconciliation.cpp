@@ -30,7 +30,7 @@ ReconciliationReport ProfileDeviceSession::reconcile() {
     try {
         const auto inspected=endpoint_->inspect_saved(); report.windows_saved=inspected.profile;
         report.saved=!inspected.profile ? SavedSettingsState::missing :
-            *inspected.profile==report.checkpoint ? SavedSettingsState::matches : SavedSettingsState::differs;
+            *inspected.profile==processing(report.checkpoint) ? SavedSettingsState::matches : SavedSettingsState::differs;
         if (inspected.device_generation!=generation) { throw std::runtime_error("Device changed while reading saved settings"); }
     } catch (const std::invalid_argument& e) { report.saved=SavedSettingsState::invalid; report.saved_detail=e.what(); }
     catch (const std::exception& e) { report.saved=SavedSettingsState::unreadable; report.saved_detail=e.what(); }
@@ -52,8 +52,8 @@ ReconciliationReport ProfileDeviceSession::reconcile() {
     if (!report.runtime || !status_is_live(*report.runtime,GetTickCount64())) { report.runtime.reset(); return report; }
     report.runtime_detail=report.runtime->detail;
     try {
-        report.running_saved=compare_runtime(report.checkpoint,*report.runtime);
-        report.running_working=compare_runtime(report.working->profile(),*report.runtime);
+        report.running_saved=compare_runtime(processing(report.checkpoint),*report.runtime);
+        report.running_working=compare_runtime(processing(report.working->profile()),*report.runtime);
     } catch (const std::exception& e) {
         report.running_saved=report.running_working=RunningEqState::unknown; report.runtime_detail=e.what();
     }

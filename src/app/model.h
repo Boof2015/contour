@@ -1,6 +1,7 @@
 #pragma once
 #include <contour/profile_device_session.h>
 #include <nlohmann/json.hpp>
+#include "audio_connection.h"
 
 namespace contour::app {
 using Json=nlohmann::json;
@@ -16,6 +17,8 @@ struct Device {
     double rate=48000;
     std::uint32_t mask=0;
     bool available=false;
+    DWORD state=0;
+    bool contour_running=false;
 };
 std::vector<Device> enumerate_devices();
 
@@ -29,7 +32,15 @@ public:
     Json state(bool include_document=true);
     void poll();
     bool closed() const noexcept;
+    const Device& selected_device() const noexcept { return devices_[device_]; }
+    const Device* find_device(std::wstring_view id) const noexcept;
+    void refresh_devices();
+    void check_connection(const std::wstring& endpoint);
+    void suspend_connections(bool value);
 private:
+    void set_eq_enabled(bool enabled);
+    void set_unassigned_eq(const Device& device);
+    void poll_master_updates();
     void bind(std::size_t index);
     void preview();
     void inspect();
@@ -43,5 +54,21 @@ private:
     std::optional<std::size_t> next_device_;
     std::optional<eq::ReconciliationReport> report_;
     std::uint64_t last_inspect_=0;
+    std::filesystem::path settings_path_;
+    bool eq_enabled_=true;
+    Json master_issues_=Json::array();
+    std::unique_ptr<AudioConnection> connection_;
+    bool connections_suspended_=false;
+    struct MasterUpdate {
+        std::wstring id;
+        std::unique_ptr<eq::ProfileDeviceSession> assigned;
+        std::unique_ptr<eq::EditSession> editor;
+        std::unique_ptr<eq::EndpointSession> endpoint;
+        bool persisted=false;
+        std::uint64_t last_attempt=0;
+    };
+    std::vector<MasterUpdate> master_updates_;
+    std::optional<Json> deferred_close_;
+    std::uint64_t deferred_close_started_=0;
 };
 } // namespace contour::app

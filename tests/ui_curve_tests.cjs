@@ -17,7 +17,7 @@ for(const {rate,filter} of fixtures){
 }
 assert.ok(checked>3000);
 evaluate(`
-  const profile={work:{bypass:false}},P=()=>profile;
+  const APP={eqEnabled:true},profile={work:{layers:[]}},P=()=>profile;
   const f=F('PK',1000,6,2),left=Ly('Left',false,1,-10,true,[f]),right=Ly('Right',false,2,-20,true,[F('PK',1000,-3,2)]);
   const sample={n:1,f:[1000],c1:[Math.cos(2*Math.PI*1000/FS)],s1:[Math.sin(2*Math.PI*1000/FS)],c2:[Math.cos(4*Math.PI*1000/FS)],s2:[Math.sin(4*Math.PI*1000/FS)]};
   f.coefficients=designCurve(f,FS);rememberCurves({layers:[left]},FS);
@@ -32,5 +32,5 @@ near(evaluate('resp(left.filters,sample)[0]'),9);
 near(evaluate('output([left,right],0,sample)[0]'),9);
 evaluate('left.gain=-80;');near(evaluate('output([left,right],0,sample)[0]'),9);
 evaluate('left.on=false;');near(evaluate('output([left,right],0,sample)[0]'),0);
-evaluate('profile.work.bypass=true;');near(evaluate('output([left,right],1,sample)[0]'),0);
-console.log(`PASS ${checked} native/JS coefficient cases; synchronous edited curves; gain-independent channel sums and bypass`);
+evaluate('APP.eqEnabled=false;');near(evaluate('output([left,right],1,sample)[0]'),-3);
+console.log(`PASS ${checked} native/JS coefficient cases; synchronous edited curves; gain-independent channel sums, layer bypass and visible curves while global EQ is off`);

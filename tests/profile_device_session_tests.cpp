@@ -122,9 +122,11 @@ void reconnect_and_format(const std::filesystem::path& path) {
     const auto writes=f.saved->writes;
     f.enumerator->lookup_result=S_OK; f.enumerator->callback->OnDeviceAdded(device_id);
     f.session.select(f.b.id);
-    require(f.session.status().endpoint.state==EndpointState::waiting_for_audio && f.saved->writes==writes,"Profile switch revived the retired runtime after a quick replug");
+    require(f.session.status().endpoint.state==EndpointState::waiting_for_audio && !f.editor()->applied(),"Profile switch revived the retired runtime after a quick replug");
+    require(f.saved->writes>writes && read_saved_profile(*f.saved.Get())==std::optional{f.library.get(f.b.id).saved},"Idle selection did not persist its checkpoint");
+    const auto idle_writes=f.saved->writes;
     f.restart(); f.session.refresh();
-    require(f.saved->writes==writes && !f.editor()->applied(),"Reconnect automatically rewrote settings or claimed application");
+    require(f.saved->writes==idle_writes && !f.editor()->applied(),"Read-only refresh rewrote settings or claimed application");
     f.session.synchronize(); f.apply(-12);
     const auto surround=f.library.create("Four channels",{gain(-4),48000,4}); const auto before=f.saved->writes; const auto request=f.request();
     f.session.select(surround.id);

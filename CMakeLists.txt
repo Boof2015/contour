@@ -90,8 +90,8 @@ add_executable(contour-audio-test tools/audio_test/main.cpp)
 contour_target(contour-audio-test)
 target_link_libraries(contour-audio-test PRIVATE ole32 uuid avrt contour-profile contour-live-control advapi32)
 
-include(CTest)
-if(BUILD_TESTING)
+# The setup helper validates the staged APO before attaching it, including in
+# builds where the rest of the test suite is disabled.
     add_executable(contour-apo-host tests/apo_host/main.cpp)
     contour_target(contour-apo-host)
     target_include_directories(contour-apo-host PRIVATE include tests)
@@ -100,6 +100,8 @@ if(BUILD_TESTING)
         target_link_options(contour-apo-host PRIVATE /NODEFAULTLIB:atls.lib)
     endif()
     add_dependencies(contour-apo-host contour-apo)
+include(CTest)
+if(BUILD_TESTING)
     add_test(NAME apo-contract COMMAND contour-apo-host $<TARGET_FILE:contour-apo>)
 
     add_executable(contour-dsp-tests tests/dsp_tests.cpp)

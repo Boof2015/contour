@@ -756,6 +756,13 @@ void test_control_bridge(const std::filesystem::path& path) {
         instance.process(source,target); output_is(-8,-5);
         instance.unlock(); instance.lock(in,out); instance.process(source,target); output_is(-9,-7);
         instance.unlock();
+        // A master toggle saved while no runtime exists must take effect at
+        // the first callback, with no editor/client present to submit it.
+        auto bypassed=editor.saved();bypassed.configuration.bypass=true;
+        write_saved_profile(*persisted.Get(),bypassed);
+        instance.lock(in,out);instance.process(source,target);output_is(0,0);instance.unlock();
+        bypassed.configuration.bypass=false;write_saved_profile(*persisted.Get(),bypassed);
+        instance.lock(in,out);instance.process(source,target);output_is(-9,-7);instance.unlock();
         const auto neutral_on_restart=[&](bool expect_error=true) {
             const auto previous=status();
             instance.lock(in,out); instance.process(source,target); output_is(0,0);

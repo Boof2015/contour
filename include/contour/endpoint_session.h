@@ -43,6 +43,9 @@ public:
     // Switch editors while preserving the endpoint observer and retired-runtime
     // history. The new editor must outlive this binding; no audio is published.
     void rebind(EditSession& editor) noexcept;
+    // Application master state is applied to device payloads, never to editor
+    // snapshots, checkpoints or history. A change retires old acknowledgements.
+    void set_bypass_override(std::optional<bool> bypass) noexcept;
     // Recheck device/runtime and compile at its actual rate before either
     // operation. Channel-count mismatch blocks both; no implicit remapping.
     void preview();
@@ -51,6 +54,9 @@ public:
     // or publishing audio. Used when the library owns the saved checkpoint.
     // Validates this profile (not an unrelated working draft) at the live format.
     EndpointCopyReceipt persist(const Profile& profile);
+    // Persist the next-start copy when the audio runtime is idle/disconnected.
+    // Uses the existing settings store only; does not attach or create a device.
+    void persist_inactive(const Profile& profile);
     // Opens User settings read-only, independently of runtime availability.
     // Missing value is distinct from malformed/unreadable settings (throws).
     EndpointSavedSnapshot inspect_saved();

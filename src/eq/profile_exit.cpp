@@ -76,9 +76,18 @@ const ProfileCloseStatus& ProfileDeviceSession::poll_close() {
             throw std::runtime_error(status_.copy_detail.empty() ? "Final device settings have not been confirmed; retry or leave the update pending" : status_.copy_detail);
         }
         if (!status_.preview_detail.empty()) { throw std::runtime_error(status_.preview_detail); }
+        if (status_.endpoint.state==EndpointState::waiting_for_audio) {
+            if (GetTickCount64()-closing_->started_ms<close_timeout_ms) {
+                close_status_={CloseState::waiting,true,"Finishing the device update"}; return close_status_;
+            }
+            throw std::runtime_error("Could not confirm the device update. Your saved EQ is retained; retry or close with the update pending");
+        }
         if (status_.endpoint.state!=EndpointState::ready || status_.endpoint.preview==PreviewFeedback::rejected ||
             status_.endpoint.preview==PreviewFeedback::disconnected) {
             throw std::runtime_error("Final audio update was not confirmed; retry or leave the update pending");
+        }
+        if (status_.endpoint.preview==PreviewFeedback::ready && closing_->target->applied()!=closing_->target->snapshot()) {
+            preview_current();
         }
         if (status_.endpoint.preview==PreviewFeedback::applied && closing_->target->applied()==closing_->target->snapshot()) {
             close_status_={CloseState::ready,false,{}}; return close_status_;

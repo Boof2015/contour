@@ -103,7 +103,7 @@ struct PreviewReply {
 // through EditSession; preview requests never overwrite the saved profile.
 class LivePreview final {
 public:
-    LivePreview(EditSession& editor, IPropertyStore* store);
+    LivePreview(EditSession& editor, IPropertyStore* store, std::optional<bool> bypass_override = {});
     LivePreview(const LivePreview&) = delete;
     LivePreview& operator=(const LivePreview&) = delete;
     PreviewStatus connect(); // Explicitly bind/rebind; never reapplies edits.
@@ -113,6 +113,7 @@ private:
     std::optional<PreviewStatus> read_status();
     void disconnect() noexcept;
     EditSession& editor_;
+    std::optional<bool> bypass_override_;
     Microsoft::WRL::ComPtr<IPropertyStore> store_;
     EditSession::Snapshot pending_;
     GUID runtime_id_{}, session_id_{};

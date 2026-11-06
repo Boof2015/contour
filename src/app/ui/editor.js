@@ -84,6 +84,8 @@ const scrub = (k, start, dx) => k === 'freq' ? start * Math.pow(2, dx / 90) : k 
 
 // ============================================================ Icons, glyphs, previews
 const PATHS = {
+  settings: '<path d="M6.5 1.5h3l.4 1.8 1.6.9 1.7-.5 1.5 2.6-1.4 1.3v.8l1.4 1.3-1.5 2.6-1.7-.5-1.6.9-.4 1.8h-3l-.4-1.8-1.6-.9-1.7.5-1.5-2.6 1.4-1.3v-.8L1.3 6.3l1.5-2.6 1.7.5 1.6-.9z"/><circle cx="8" cy="8" r="2.5"/>',
+  refresh: '<path d="M13 6A5.2 5.2 0 1 0 13 10M13 2v4H9"/>',
   speaker: '<path d="M2.5 6h2.2L8.5 3v10L4.7 10H2.5z"/><path d="M11 5.6a3.4 3.4 0 0 1 0 4.8"/>',
   tv: '<rect x="1.8" y="3" width="12.4" height="8.4" rx="1.4"/><path d="M5.5 13.6h5"/>',
   headphones: '<path d="M3 11.5V8.5a5 5 0 0 1 10 0v3"/><rect x="2" y="10" width="3" height="4" rx="1"/><rect x="11" y="10" width="3" height="4" rx="1"/>',
@@ -127,11 +129,11 @@ function field(k, i, f) {
   return `<label class="fld${dis ? ' dis' : ''}">${k === 'q' ? '<span class="pre">Q</span>' : ''}${k === 'lgain' ? '<span class="pre" style="margin-right:2px">Gain</span>' : ''}<input class="tnum" data-k="${k}" data-i="${i}" data-unit="${u}" value="${v}" ${dis ? 'disabled' : ''} spellcheck="false" aria-label="${k}"><span class="u">${u}</span></label>`;
 }
 function typeSel(f, i) {
-  return `<span class="tsel">${glyph(f, i)}<select data-type="${i}" aria-label="Filter ${i + 1} type">${TYPES.map(([id, name]) => `<option value="${id}"${id === f.type ? ' selected' : ''}>${name}</option>`).join('')}</select></span>`;
+  return `<button class="tsel" data-type="${i}" id="type-${i}" aria-label="Filter ${i + 1} type: ${TYPE[f.type].name}" aria-haspopup="listbox" aria-expanded="${S.pop==='filtertype'&&S.typeBand===i}">${glyph(f, i)}<span>${TYPE[f.type].name}</span></button>`;
 }
 function row(f, i) {
-  return `<div class="row${i === S.band ? ' sel' : ''}${f.on ? '' : ' off'}" data-band="${i}">
-    <span class="sw sm${f.on ? ' on' : ''}" data-bandon="${i}" title="${f.on ? 'Turn off' : 'Turn on'}"></span><span class="badge">${i + 1}</span>${typeSel(f, i)}${field('freq', i, f)}${field('gain', i, f)}${field('q', i, f)}<button class="rm" data-del="${i}" title="Remove filter">${I('x')}</button></div>`;
+  return `<div class="row${i === S.band ? ' sel' : ''}${f.on ? '' : ' off'}" data-band="${i}" tabindex="0" aria-label="Filter ${i+1}">
+    <span class="sw sm${f.on ? ' on' : ''}" data-bandon="${i}" title="${f.on ? 'Turn off' : 'Turn on'}"></span><span class="badge">${i + 1}</span>${typeSel(f, i)}${field('freq', i, f)}${field('gain', i, f)}${field('q', i, f)}<button class="rm" data-del="${i}" title="Remove filter (Delete)" aria-label="Remove filter ${i+1}">${I('x')}</button></div>`;
 }
 function bandsInner() {
   const l = L(); if (!l) return '';
@@ -154,7 +156,7 @@ function editorView() {
           <button class="chf${S.pop === 'channels' ? ' open' : ''}" id="chBtn" title="Which channels this layer processes"><span class="k">Channels</span><span class="v">${targetSummary(d, l)}</span>${I('chev')}</button>
           <div class="gainbox">${field('lgain', 0, null)}</div>
           <button class="ib${S.pop === 'layermenu' ? ' open' : ''}" id="layerMenuBtn" title="Layer actions">${I('dots')}</button></div>
-        <div class="well"><canvas id="graph"></canvas><div class="tip" id="tip" hidden></div>
+        <div class="well"><canvas id="graph" tabindex="0" aria-label="Filter graph. Select a point; Delete removes the selected filter."></canvas><div class="tip" id="tip" hidden></div>
           <div class="tools">${chCount(d) > 2
             ? `<div class="split"><button class="toggle${S.output ? ' on' : ''}" id="outToggle" title="Filter response from all layers, excluding layer gain"><i></i>Combined filters${S.output ? ` · ${S.outMode === 'layer' ? 'this layer\'s channels' : bits(S.outMask).length + ' chosen'}` : ''}</button><button class="toggle more${S.output ? ' on' : ''}${S.pop === 'outch' ? ' open' : ''}" id="outBtn" title="Choose channels to show">${I('chev')}</button></div>`
             : `<button class="toggle${S.output ? ' on' : ''}" id="outToggle" title="Filter response from all layers, excluding layer gain"><i></i>Combined filters</button>`}</div>
@@ -312,6 +314,7 @@ function bindGraph() {
   const pt = e => { const r = cv.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
   cv.addEventListener('pointerdown', e => {
     if (e.button !== 0) return;
+    cv.focus({preventScroll:true});
     const [px, py] = pt(e), i = hit(px, py); if (i < 0) return;
     selectBand(i);
     const f = L().filters[i], n = nodes.find(n => n[0] === i);
@@ -401,4 +404,4 @@ function add(o,f,g) {
 }
 const resp=(fs,g)=>{const o=new Float64Array(g.n);fs.forEach(f=>f.on&&add(o,f,g));return o;};
 const one=(f,g)=>{const o=new Float64Array(g.n);add(o,f,g);return o;};
-function output(layers,c,g){const o=new Float64Array(g.n);if(P()?.work.bypass)return o;layers.forEach(l=>{if(l.on&&targets(l,c)){const r=resp(l.filters,g);for(let i=0;i<g.n;i++)o[i]+=r[i];}});return o;}
+function output(layers,c,g){const o=new Float64Array(g.n);layers.forEach(l=>{if(l.on&&targets(l,c)){const r=resp(l.filters,g);for(let i=0;i<g.n;i++)o[i]+=r[i];}});return o;}
