@@ -6,9 +6,11 @@
 #include <limits>
 #include <memory>
 #include <new>
+#include <stdexcept>
 
 namespace contour::eq {
 ResidentBank* ResidentBank::prepare(const Configuration& config, double rate, std::size_t count, std::uint64_t revision) {
+    if (revision>=SmoothEq::transitioning) { throw std::invalid_argument("Reserved audio bank revision"); }
     ParametricEq compiled;
     compiled.configure(config, rate, count);
     std::size_t total = 0;
@@ -42,6 +44,7 @@ void SmoothEq::clear() noexcept {
     ResidentBank::release(pending_.exchange(nullptr));
     reclaim(); progress_ = 0; channels_ = 0;
     applied_.store(0, std::memory_order_release);
+    processed_.store(not_processed, std::memory_order_release);
 }
 bool SmoothEq::publish(ResidentBank* bank) noexcept {
     if (!bank || bank->channels != channels_) { ResidentBank::release(bank); return false; }
@@ -84,6 +87,7 @@ bool SmoothEq::process(const float* input, float* output, std::size_t frames) no
         progress_ = 0;
     }
     bool audible = false;
+    if (incoming_) { processed_.store(transitioning, std::memory_order_release); }
     const auto count = current_->channels;
     for (std::size_t frame = 0; frame < frames; ++frame) {
         const double weight = static_cast<double>(progress_)/static_cast<double>(fade_frames_-1);
@@ -107,6 +111,7 @@ bool SmoothEq::process(const float* input, float* output, std::size_t frames) no
             retired_.store(previous, std::memory_order_release);
         }
     }
+    if (!incoming_) { processed_.store(current_->revision, std::memory_order_release); }
     return audible;
 }
 #pragma AVRT_CODE_END

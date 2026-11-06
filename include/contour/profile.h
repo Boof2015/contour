@@ -9,6 +9,7 @@ struct Profile {
     Configuration configuration;
     double validation_sample_rate = 48000;
     std::size_t channels = 2;
+    bool operator==(const Profile&) const = default;
 };
 
 // Versioned UTF-8 data, with no external references or executable commands.

@@ -21,6 +21,7 @@ struct Filter {
     double gain_db = 0; // Used by peaks/shelves; must be zero for other types.
     double q = butterworth_q;
     bool enabled = true;
+    bool operator==(const Filter&) const = default;
 };
 
 struct ChannelSelection {
@@ -29,6 +30,7 @@ struct ChannelSelection {
     bool all = true;
     std::uint32_t mask = 0;
     static ChannelSelection selected(std::uint32_t mask) { return {false, mask}; }
+    bool operator==(const ChannelSelection&) const = default;
 };
 
 struct Layer {
@@ -37,11 +39,13 @@ struct Layer {
     std::vector<Filter> filters;
     double gain_db = 0;
     bool enabled = true;
+    bool operator==(const Layer&) const = default;
 };
 
 struct Configuration {
     std::vector<Layer> layers;
     bool bypass = false;
+    bool operator==(const Configuration&) const = default;
 };
 
 // A frequency-grid estimate, not a transient/true-peak or clipping guarantee.

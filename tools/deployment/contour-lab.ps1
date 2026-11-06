@@ -6,6 +6,7 @@ param(
     [Parameter(Mandatory=$true)][string] $File,
     [string] $EndpointId,
     [string] $BuildDirectory = '',
+    [string] $InitialProfile = '',
     [switch] $UseExistingUnprotectedAudio
 )
 Set-StrictMode -Version Latest
@@ -141,6 +142,10 @@ try {
     if ((Get-FileHash -LiteralPath $plan.TargetDll -Algorithm SHA256).Hash -cne $plan.DllSha256) { throw 'Staged DLL hash mismatch.' }
     & (Join-Path $plan.Package 'contour-apo-host.exe') $plan.TargetDll
     if ($LASTEXITCODE -ne 0) { throw 'Staged APO failed its standalone tests; registration was not changed.' }
+    if (-not [string]::IsNullOrWhiteSpace($InitialProfile)) {
+        & (Join-Path $sourceDirectory 'contour-eq-inspect.exe') --apply ([IO.Path]::GetFullPath($InitialProfile)) (Join-Path $plan.Package 'profile.contour') | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'Initial profile staging failed; registration was not changed.' }
+    }
     $journal = New-ContourJournal $plan
     $journalPath = Join-Path $plan.Package 'journal.json'
     Save-ContourJournal $journal $journalPath -CreateNew

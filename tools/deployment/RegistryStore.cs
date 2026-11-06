@@ -44,6 +44,69 @@ namespace Contour.Deployment {
             catch (UnauthorizedAccessException) { return false; }
             catch (System.Security.SecurityException) { return false; }
         }
+        public string Security(string path) {
+            using (var key = root.OpenSubKey(path, RegistryKeyPermissionCheck.ReadSubTree,
+                System.Security.AccessControl.RegistryRights.ReadPermissions)) {
+                if (key == null) throw new IOException("Missing security target: " + path);
+                return key.GetAccessControl(System.Security.AccessControl.AccessControlSections.Access |
+                    System.Security.AccessControl.AccessControlSections.Owner |
+                    System.Security.AccessControl.AccessControlSections.Group).GetSecurityDescriptorSddlForm(
+                        System.Security.AccessControl.AccessControlSections.Access |
+                        System.Security.AccessControl.AccessControlSections.Owner |
+                        System.Security.AccessControl.AccessControlSections.Group);
+            }
+        }
+        // This opt-in installer operation can create only Contour's four context
+        // keys. It never changes an existing key's owner or DACL. Some endpoint
+        // stores deny CreateSubKey even to elevated administrators; Windows'
+        // documented restore privilege permits this narrowly scoped creation.
+        public void CreateControlContextKey(string path, bool allowRestorePrivilege) {
+            RequireWrite();
+            const string pattern = @"\ASOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render\\\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}\\FxProperties\\\{8b5699ab-dbc3-4ff7-82ed-8fbcbf7c8cf4\}(\\(Default|User|Volatile))?\z";
+            if (!System.Text.RegularExpressions.Regex.IsMatch(path, pattern, System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+                throw new InvalidOperationException("Context creation path is outside the allowlist.");
+            if (Exists(path) || !Exists(path.Substring(0, path.LastIndexOf('\\'))))
+                throw new IOException("Context target exists or its immediate parent is absent.");
+            IntPtr descriptor = IntPtr.Zero, inherited = IntPtr.Zero, created = IntPtr.Zero, token = IntPtr.Zero;
+            uint descriptorSize, disposition;
+            // Administrators can remove the newly created keys during recovery.
+            // Parent inheritance remains enabled; no existing ACL is rewritten.
+            if (!ConvertStringSecurityDescriptorToSecurityDescriptor("D:(A;CI;KA;;;BA)", 1,
+                out descriptor, out descriptorSize)) throw new Win32Exception(Marshal.GetLastWin32Error());
+            try {
+                byte[] parent;
+                using (var key = root.OpenSubKey(path.Substring(0, path.LastIndexOf('\\')), RegistryKeyPermissionCheck.ReadSubTree,
+                    System.Security.AccessControl.RegistryRights.ReadPermissions)) {
+                    parent = key.GetAccessControl(System.Security.AccessControl.AccessControlSections.Access |
+                        System.Security.AccessControl.AccessControlSections.Owner |
+                        System.Security.AccessControl.AccessControlSections.Group).GetSecurityDescriptorBinaryForm();
+                }
+                if (!OpenProcessToken(GetCurrentProcess(), 0x8, out token)) throw new Win32Exception(Marshal.GetLastWin32Error());
+                var mapping = new GenericMapping { Read = 0x20019, Write = 0x20006, Execute = 0x20019, All = 0xF003F };
+                if (!CreatePrivateObjectSecurityEx(parent, descriptor, out inherited, IntPtr.Zero, true, 1, token, ref mapping))
+                    throw new Win32Exception(Marshal.GetLastWin32Error());
+                var attributes = new SecurityAttributes { Length = Marshal.SizeOf(typeof(SecurityAttributes)), Descriptor = inherited };
+                int result = RegCreateContextKey(root.Handle, path, 0, null, 0, 0xF003F | 0x100,
+                    ref attributes, out created, out disposition);
+                if (result == 5 && allowRestorePrivilege) {
+                    using (var privilege = new RestorePrivilege()) {
+                        result = RegCreateContextKey(root.Handle, path, 0, null, 4, 0,
+                            ref attributes, out created, out disposition);
+                    }
+                }
+                Check(result);
+                if (disposition != 1) throw new IOException("Context key appeared after planning.");
+            } finally {
+                if (created != IntPtr.Zero) RegCloseKey(created);
+                if (inherited != IntPtr.Zero) DestroyPrivateObjectSecurity(ref inherited);
+                if (token != IntPtr.Zero) CloseHandle(token);
+                LocalFree(descriptor);
+            }
+            using (var key = root.OpenSubKey(path, false)) {
+                if (key == null) throw new IOException("Created context key is missing.");
+                key.Flush();
+            }
+        }
         public RawValue Read(string path, string name) {
             using (var key = root.OpenSubKey(path, false)) {
                 if (key == null) return null;
@@ -151,6 +214,63 @@ namespace Contour.Deployment {
             int options, int access, IntPtr security, out IntPtr key, out uint disposition);
         [DllImport("advapi32.dll")] private static extern int RegFlushKey(IntPtr key);
         [DllImport("advapi32.dll")] private static extern int RegCloseKey(IntPtr key);
+        [StructLayout(LayoutKind.Sequential)] private struct SecurityAttributes {
+            public int Length;
+            public IntPtr Descriptor;
+            public int Inherit;
+        }
+        [DllImport("advapi32.dll", EntryPoint = "RegCreateKeyExW", CharSet = CharSet.Unicode)]
+        private static extern int RegCreateContextKey(SafeRegistryHandle root, string path, int reserved, string cls,
+            int options, int access, ref SecurityAttributes security, out IntPtr key, out uint disposition);
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool ConvertStringSecurityDescriptorToSecurityDescriptor(string text, uint revision,
+            out IntPtr descriptor, out uint size);
+        [DllImport("kernel32.dll")] private static extern IntPtr LocalFree(IntPtr memory);
+        [StructLayout(LayoutKind.Sequential)] private struct GenericMapping { public uint Read, Write, Execute, All; }
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern bool CreatePrivateObjectSecurityEx(byte[] parent, IntPtr creator, out IntPtr descriptor,
+            IntPtr objectType, bool container, uint flags, IntPtr token, ref GenericMapping mapping);
+        [DllImport("advapi32.dll", SetLastError = true)] private static extern bool DestroyPrivateObjectSecurity(ref IntPtr descriptor);
+        [DllImport("kernel32.dll")] private static extern IntPtr GetCurrentProcess();
+        [DllImport("kernel32.dll")] private static extern bool CloseHandle(IntPtr handle);
+        [DllImport("advapi32.dll", SetLastError = true)] private static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+    }
+
+    internal sealed class RestorePrivilege : IDisposable {
+        [StructLayout(LayoutKind.Sequential, Pack = 4)] private struct Privileges {
+            public uint Count;
+            public long Luid;
+            public uint Attributes;
+        }
+        private IntPtr token;
+        private Privileges previous;
+        public RestorePrivilege() {
+            if (!OpenProcessToken(GetCurrentProcess(), 0x28, out token)) throw new Win32Exception(Marshal.GetLastWin32Error());
+            try {
+                long luid;
+                if (!LookupPrivilegeValue(null, "SeRestorePrivilege", out luid)) throw new Win32Exception(Marshal.GetLastWin32Error());
+                var requested = new Privileges { Count = 1, Luid = luid, Attributes = 2 };
+                uint length;
+                if (!AdjustTokenPrivileges(token, false, ref requested, (uint)Marshal.SizeOf(typeof(Privileges)), out previous, out length))
+                    throw new Win32Exception(Marshal.GetLastWin32Error());
+                int error = Marshal.GetLastWin32Error();
+                if (error != 0) throw new Win32Exception(error);
+            } catch { CloseHandle(token); token = IntPtr.Zero; throw; }
+        }
+        public void Dispose() {
+            if (token == IntPtr.Zero) return;
+            Privileges ignored; uint length;
+            bool restored = AdjustTokenPrivileges(token, false, ref previous, (uint)Marshal.SizeOf(typeof(Privileges)), out ignored, out length);
+            int error = Marshal.GetLastWin32Error();
+            CloseHandle(token); token = IntPtr.Zero;
+            if (!restored || error != 0) throw new Win32Exception(error);
+        }
+        [DllImport("kernel32.dll")] private static extern IntPtr GetCurrentProcess();
+        [DllImport("kernel32.dll")] private static extern bool CloseHandle(IntPtr handle);
+        [DllImport("advapi32.dll", SetLastError = true)] private static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern bool LookupPrivilegeValue(string system, string name, out long luid);
+        [DllImport("advapi32.dll", SetLastError = true)] private static extern bool AdjustTokenPrivileges(IntPtr token, bool disable,
+            ref Privileges state, uint size, out Privileges previous, out uint length);
     }
 
     public static class DurableFile {

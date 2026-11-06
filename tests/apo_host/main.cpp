@@ -6,6 +6,8 @@
 #include <contour/apo_ids.h>
 #include <contour/profile.h>
 #include "test_support.h"
+#include "control_test_support.h"
+#include <contour/endpoint_session.h>
 
 #include <algorithm>
 #include <array>
@@ -643,6 +645,188 @@ void test_live_profile(const std::filesystem::path& path) {
     hr(module.can_unload(),S_OK,"profile workers stopped before DLL unload");
 }
 
+void test_control_bridge(const std::filesystem::path& path) {
+    using namespace contour::eq;
+    const auto directory=path.parent_path()/(L"control-host-"+std::to_wstring(GetCurrentProcessId())+L"-"+std::to_wstring(GetTickCount64()));
+    require(std::filesystem::create_directory(directory),"create private control test directory");
+    struct Cleanup {
+        std::filesystem::path directory;
+        ~Cleanup() {
+            std::error_code ignored;
+            std::filesystem::remove(directory/L"profile.contour",ignored);
+            std::filesystem::remove(directory/L"contour-apo.dll",ignored);
+            std::filesystem::remove(directory,ignored);
+        }
+    } cleanup{directory};
+    std::filesystem::copy_file(path,directory/L"contour-apo.dll");
+    const Module module(directory/L"contour-apo.dll");
+    const auto profile_path=directory/L"profile.contour";
+    const auto gains=[](double left,double right) -> Configuration {
+        return {{{"Left",ChannelSelection::selected(1),{},left},{"Right",ChannelSelection::selected(2),{},right}}};
+    };
+    for (const float rate : {48000.0F,44100.0F}) {
+        const Profile saved{gains(-2,-3),48000,2};
+        // A different legacy file proves settings mode does not consume it.
+        save_profile_file(profile_path,{gains(-31,-32),48000,2});
+        const auto original=read_profile_file(profile_path);
+        const auto store=Microsoft::WRL::Make<control_test::Store>();
+        const auto persisted=Microsoft::WRL::Make<control_test::Store>();
+        EditSession seed(saved); save_profile_settings(seed,*persisted.Get());
+        const auto endpoint=Microsoft::WRL::Make<control_test::Endpoint>(store.Get(),persisted.Get());
+        const auto devices=Microsoft::WRL::Make<control_test::Devices>(endpoint.Get());
+        Instance instance(module,post_mix_clsid,false);
+        APOInitSystemEffects init{}; init.APOInit={sizeof(init),post_mix_clsid}; init.pDeviceCollection=devices.Get();
+        hr(instance.apo->Initialize(sizeof(init),reinterpret_cast<BYTE*>(&init)),S_OK,"initialize settings bridge");
+        constexpr UINT32 frames=128;
+        auto media=format(2,rate); Buffer input(frames*2),output(frames*2); input.fill(0.1F);
+        auto in=descriptor(media.Get(),input.data(),frames),out=descriptor(media.Get(),output.data(),frames);
+        auto source=property(input.data(),frames,BUFFER_VALID),target=property(output.data(),0,BUFFER_INVALID);
+        instance.lock(in,out);
+        const auto wait_for=[&](auto condition) {
+            const auto deadline=GetTickCount64()+4000;
+            while (GetTickCount64()<deadline) { if (condition()) { return; } Sleep(1); }
+            throw std::runtime_error("APO control bridge timed out");
+        };
+        const auto status=[&]() -> std::optional<PreviewStatus> {
+            const auto bytes=read_control_value(*store.Get(),preview_status_key,max_status_bytes);
+            return bytes ? std::optional{decode_status(*bytes)} : std::nullopt;
+        };
+        wait_for([&] { const auto s=status(); return s && s->state==PreviewState::ready; });
+        EditSession editor(saved); LivePreview client(editor,store.Get());
+        const auto initial_status=client.connect();
+        require(initial_status.sample_rate==rate && initial_status.channels==2,"bridge did not report actual format");
+        require(initial_status.evidence==RuntimeEvidence::loaded && initial_status.active_fingerprint==processing_fingerprint(saved.configuration,rate,2),"APO startup did not identify the loaded bank before audio callbacks");
+        const auto output_is=[&](double left,double right) {
+            require(target.u32BufferFlags==BUFFER_VALID,"preview output invalid");
+            for (UINT32 i=0; i<frames; ++i) {
+                expect_near(output.data()[i*2],0.1*std::pow(10.0,left/20),"left preview output");
+                expect_near(output.data()[i*2+1],0.1*std::pow(10.0,right/20),"right preview output");
+            }
+        };
+        const auto settle=[&](double left,double right) {
+            wait_for([&] {
+                instance.process(source,target);
+                const auto reply=client.poll();
+                if (reply.feedback==PreviewFeedback::rejected) { throw std::runtime_error(reply.detail); }
+                return reply.feedback==PreviewFeedback::applied;
+            });
+            output_is(left,right);
+            require(editor.applied()==editor.snapshot(),"APO reply did not acknowledge the editor snapshot");
+            wait_for([&] { const auto s=status(); return s && s->evidence==RuntimeEvidence::processed && s->active_fingerprint==processing_fingerprint(editor.working().configuration,rate,2); });
+        };
+        instance.process(source,target); output_is(-2,-3);
+        wait_for([&] { const auto s=status(); return s && s->evidence==RuntimeEvidence::processed && s->active_fingerprint==processing_fingerprint(saved.configuration,rate,2); });
+        editor.replace(gains(-8,-5)); client.submit();
+        wait_for([&] { const auto s=status(); return s && s->state==PreviewState::queued; });
+        require(client.poll().feedback==PreviewFeedback::waiting && !editor.applied(),"idle engine acknowledged without audio processing");
+        instance.process(source,target);
+        require(client.poll().feedback==PreviewFeedback::waiting,"partial audio crossfade acknowledged early");
+        settle(-8,-5);
+        require(read_profile_file(profile_path)==original && editor.dirty(),"preview overwrote saved profile");
+        save_profile_settings(editor,*persisted.Get());
+        editor.replace(gains(-12,-10)); client.submit(); settle(-12,-10);
+        require(editor.undo(),"undo failed"); client.submit(); settle(-8,-5);
+        require(editor.redo(),"redo failed"); client.submit(); settle(-12,-10);
+        require(editor.revert(),"revert failed"); client.submit(); settle(-8,-5);
+        if (rate==44100) {
+            auto invalid_at_stream_rate=editor.working().configuration;
+            invalid_at_stream_rate.layers[0].filters.push_back({FilterType::peak,23000,2,1});
+            editor.replace(invalid_at_stream_rate); client.submit();
+            wait_for([&] { return client.poll().feedback==PreviewFeedback::rejected; });
+            require(editor.awaiting_preview(),"rejection acknowledged invalid settings");
+            instance.process(source,target); output_is(-8,-5);
+            require(editor.revert(),"revert rejected draft failed"); client.submit(); settle(-8,-5);
+        }
+        editor.replace(gains(-4,-6)); client.submit(); settle(-4,-6);
+        instance.unlock();
+        require(client.poll().feedback==PreviewFeedback::disconnected && !editor.applied(),"unlock retained active confirmation");
+        instance.lock(in,out);
+        wait_for([&] { const auto s=status(); return s && s->state==PreviewState::ready && s->runtime!=initial_status.runtime; });
+        Sleep(250); // Let the new worker see the old request still in the volatile store.
+        instance.process(source,target); output_is(-8,-5);
+        require(client.poll().feedback==PreviewFeedback::disconnected && editor.dirty(),"restart retained old confirmation or discarded draft");
+        client.connect();
+        instance.process(source,target); output_is(-8,-5); // Connecting itself does not apply the draft.
+        client.submit(); settle(-4,-6);
+        require(editor.revert(),"final revert failed"); client.submit(); settle(-8,-5);
+        require(read_saved_profile(*persisted.Get())==std::optional{editor.saved()},"saved state changed across preview/restart");
+        require(read_profile_file(profile_path)==original,"settings save altered the legacy package file");
+        editor.replace(gains(-9,-7)); save_profile_settings(editor,*persisted.Get());
+        require(!editor.dirty() && editor.awaiting_preview(),"save falsely confirmed audio application");
+        instance.process(source,target); output_is(-8,-5);
+        instance.unlock(); instance.lock(in,out); instance.process(source,target); output_is(-9,-7);
+        instance.unlock();
+        const auto neutral_on_restart=[&](bool expect_error=true) {
+            const auto previous=status();
+            instance.lock(in,out); instance.process(source,target); output_is(0,0);
+            wait_for([&] { const auto s=status(); return s && (!previous || s->runtime!=previous->runtime); });
+            require(status()->detail.empty()!=expect_error,"startup settings error was hidden or invented");
+            wait_for([&] { const auto s=status(); return s && s->evidence==RuntimeEvidence::processed && s->active_fingerprint==processing_fingerprint({},rate,2); });
+            instance.unlock();
+        };
+        write_control_value(*persisted.Get(),saved_profile_key,"broken saved settings"); neutral_on_restart();
+        write_control_value(*persisted.Get(),saved_profile_key,serialize_profile({gains(-4,-5),48000,4})); neutral_on_restart();
+        if (rate==44100) {
+            Profile high{{{{"High",{},{{FilterType::peak,23000,2,1}}}}},48000,2};
+            write_control_value(*persisted.Get(),saved_profile_key,serialize_profile(high)); neutral_on_restart();
+        }
+        PROPVARIANT empty{}; hr(persisted->SetValue(saved_profile_key,empty),S_OK,"clear saved fixture");
+        neutral_on_restart(false);
+        persisted->read_result=E_ACCESSDENIED; neutral_on_restart(); persisted->read_result=S_OK;
+        input.guards(); output.guards();
+    }
+    hr(module.can_unload(),S_OK,"control worker and marshaled settings references released");
+}
+
+void test_device_recovery(const Module& module) {
+    using namespace contour::eq;
+    constexpr auto id=L"host-selected-device";
+    const Profile saved{{{{"All",{},{},-3}}},48000,2};
+    const auto persisted=Microsoft::WRL::Make<control_test::Store>();
+    write_saved_profile(*persisted.Get(),saved);
+    EditSession editor(saved);
+    const auto enumerator=Microsoft::WRL::Make<control_test::Enumerator>(id,nullptr);
+    EndpointSession session(editor,id,enumerator.Get());
+    editor.replace({{{"Draft",{},{},-9}}}); const auto draft=editor.snapshot();
+    struct Format { float rate; UINT32 channels; };
+    for (const auto layout : {Format{48000,2},Format{44100,2},Format{48000,4},Format{96000,2}}) {
+        const auto store=Microsoft::WRL::Make<control_test::Store>();
+        const auto endpoint=Microsoft::WRL::Make<control_test::Endpoint>(store.Get(),persisted.Get());
+        const auto devices=Microsoft::WRL::Make<control_test::Devices>(endpoint.Get());
+        enumerator->endpoint(endpoint.Get()); enumerator->lookup_result=S_OK;
+        enumerator->callback->OnDeviceAdded(id);
+        Instance instance(module,post_mix_clsid,false);
+        APOInitSystemEffects init{}; init.APOInit={sizeof(init),post_mix_clsid}; init.pDeviceCollection=devices.Get();
+        hr(instance.apo->Initialize(sizeof(init),reinterpret_cast<BYTE*>(&init)),S_OK,"initialize returning endpoint APO");
+        constexpr UINT32 frames=128;
+        auto media=format(layout.channels,layout.rate); Buffer input(frames*layout.channels),output(frames*layout.channels); input.fill(0.1F);
+        auto in=descriptor(media.Get(),input.data(),frames),out=descriptor(media.Get(),output.data(),frames);
+        auto source=property(input.data(),frames,BUFFER_VALID),target=property(output.data(),0,BUFFER_INVALID);
+        instance.lock(in,out);
+        const auto deadline=GetTickCount64()+3000;
+        while (!session.refresh().runtime && GetTickCount64()<deadline) { Sleep(1); }
+        const auto current=session.refresh(); require(current.runtime.has_value(),"Returning APO never reported its format");
+        require(current.runtime->sample_rate==layout.rate && current.runtime->channels==layout.channels,"Wrong rebuilt runtime format");
+        instance.process(source,target);
+        const auto initial=layout.channels==2 ? 0.1*std::pow(10.0,-3.0/20) : 0.1;
+        for (UINT32 i=0; i<frames*layout.channels; ++i) { expect_near(output.data()[i],initial,"reconnect loaded saved settings without replaying draft"); }
+        require(!read_control_value(*store.Get(),preview_request_key,max_request_bytes) && !editor.applied(),"Reconnect automatically published or confirmed draft");
+        if (layout.channels==2) {
+            require(current.state==EndpointState::ready,"Compatible rebuilt graph did not become ready");
+            session.preview();
+            const auto applied_deadline=GetTickCount64()+3000;
+            while (session.refresh().preview!=PreviewFeedback::applied && GetTickCount64()<applied_deadline) { instance.process(source,target); Sleep(1); }
+            require(editor.applied()==editor.snapshot(),"Returning graph never acknowledged explicit preview");
+            instance.process(source,target);
+            for (UINT32 i=0; i<frames*2; ++i) { expect_near(output.data()[i],0.1*std::pow(10.0,-9.0/20),"reconnected preview output"); }
+        } else { require(current.state==EndpointState::incompatible,"Four-channel device accepted a stereo draft"); }
+        instance.unlock(); enumerator->lookup_result=E_NOTFOUND; enumerator->callback->OnDeviceRemoved(id);
+        require(session.refresh().state==EndpointState::unavailable && !editor.applied(),"Removal left the old APO confirmed");
+        require(editor.snapshot()==draft && editor.saved()==saved && editor.can_undo(),"Device lifecycle lost editing state");
+        input.guards(); output.guards();
+    }
+}
+
 int run(const std::filesystem::path& path) {
     const ComRuntime com;
     const Module module(path);
@@ -660,6 +844,8 @@ int run(const std::filesystem::path& path) {
     suite.run("silence, invalid buffers, bounds, and channel isolation", [&] { test_flags(module); });
     suite.run("pre/post chain applies -6 dB exactly once", [&] { test_chain(module); });
     suite.run("saved PEQ, actual stream rates, tails, live edits, rejection and bypass", [&] { test_live_profile(path); });
+    suite.run("editor to actual APO through Windows properties, acknowledgement, rejection, save/revert, and restart", [&] { test_control_bridge(path); });
+    suite.run("device controller across actual APO recreation, rate/channel changes, preserved drafts, and explicit preview", [&] { test_device_recovery(module); });
     suite.run("DLL unloads after all test instances", [&] { hr(module.can_unload(), S_OK, "final lifetime"); });
     return suite.finish();
 }

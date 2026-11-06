@@ -8,6 +8,7 @@
 #include <mmdeviceapi.h>
 #include <wrl/client.h>
 #include <contour/profile.h>
+#include <contour/live_control.h>
 
 #include <algorithm>
 #include <array>
@@ -135,7 +136,16 @@ std::string json_string(std::wstring_view text) {
 
 // Writes happen on a separate control thread while the same render/capture
 // clients keep running. The audio pump only announces capture progress.
-class ProfileUpdates {
+class Updates {
+public:
+    virtual ~Updates() = default;
+    virtual void start() = 0;
+    virtual void progress(std::size_t frames, UINT32 rate) = 0;
+    virtual void finish() = 0;
+    virtual void report(std::ostream&) const {}
+};
+
+class ProfileUpdates final : public Updates {
 public:
     ProfileUpdates(const std::filesystem::path& destination, const std::filesystem::path& update,
                    const std::filesystem::path& bypass) : destination_(destination) {
@@ -148,7 +158,7 @@ public:
         require(contour::eq::read_profile_file(destination_).has_value(), "Installed profile does not exist");
     }
     ~ProfileUpdates() { stop(); }
-    void start() {
+    void start() override {
         worker_ = std::thread([this] {
             try {
                 unsigned applied = 0;
@@ -162,10 +172,10 @@ public:
             } catch (...) { error_ = std::current_exception(); }
         });
     }
-    void progress(std::size_t frames, UINT32 rate) {
+    void progress(std::size_t frames, UINT32 rate) override {
         requested_.store(frames >= static_cast<std::size_t>(rate)*7 ? 2u : frames >= static_cast<std::size_t>(rate)*3 ? 1u : 0u);
     }
-    void finish() {
+    void finish() override {
         stop();
         if (error_) { std::rethrow_exception(error_); }
         require(applied_.load() == 2, "Profile updates did not finish during capture");
@@ -180,7 +190,117 @@ private:
     std::exception_ptr error_;
 };
 
-int measure(const wchar_t* endpoint_id, const std::filesystem::path& output_path, ProfileUpdates* updates = nullptr) {
+class ControlUpdates final : public Updates {
+public:
+    ControlUpdates(std::wstring endpoint, const std::filesystem::path& initial,
+                   const std::filesystem::path& update, const std::filesystem::path& bypass, bool save_update=false)
+        : endpoint_(std::move(endpoint)), saved_path_(initial),save_update_(save_update) {
+        const std::array paths{initial,update,bypass};
+        for (std::size_t i=0; i<paths.size(); ++i) {
+            const auto text=contour::eq::read_profile_file(paths[i]); require(text.has_value(),"Missing control fixture");
+            profiles_[i]=contour::eq::parse_profile(*text);
+            if (i==0) { saved_text_=*text; }
+            require(profiles_[i].channels==2,"Control experiment requires stereo profiles");
+        }
+        require(!profiles_[0].configuration.bypass && !profiles_[1].configuration.bypass && profiles_[2].configuration.bypass,
+                "Expected initial/update profiles followed by bypass");
+        HANDLE token=nullptr; require(OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY,&token)!=FALSE,"Read publisher token");
+        TOKEN_ELEVATION elevation{}; DWORD size=0;
+        const auto queried=GetTokenInformation(token,TokenElevation,&elevation,sizeof(elevation),&size);
+        restricted_=IsTokenRestricted(token)!=FALSE; elevated_=elevation.TokenIsElevated!=0; CloseHandle(token);
+        require(queried!=FALSE,"Read publisher elevation");
+    }
+    ~ControlUpdates() override { stop(); }
+    void start() override {
+        worker_=std::thread([this] {
+            const auto com=CoInitializeEx(nullptr,COINIT_MULTITHREADED);
+            try {
+                check(com,"Initialize preview control COM");
+                using namespace contour::eq;
+                ComPtr<IMMDeviceEnumerator> enumerator;
+                check(CoCreateInstance(__uuidof(MMDeviceEnumerator),nullptr,CLSCTX_ALL,IID_PPV_ARGS(&enumerator)),"Create control endpoint enumerator");
+                ComPtr<IMMDevice> device; check(enumerator->GetDevice(endpoint_.c_str(),&device),"Find control endpoint");
+                ComPtr<IPropertyStore> store; check(open_control_store(device.Get(),&store),"Open preview control store");
+                ComPtr<IPropertyStore> saved; check(open_saved_store(device.Get(),STGM_READ,&saved),"Open saved settings");
+                require(read_saved_profile(*saved.Get())==std::optional{profiles_[0]},"Initial saved settings differ from fixture");
+                EditSession editor(profiles_[0]); LivePreview preview(editor,store.Get());
+                const auto ready_deadline=GetTickCount64()+3000;
+                while (true) {
+                    try { runtime_=preview.connect().runtime; break; }
+                    catch (...) {
+                        if (GetTickCount64()>=ready_deadline || WaitForSingleObject(stop_.value,20)!=WAIT_TIMEOUT) { throw; }
+                    }
+                }
+                unsigned next=0;
+                while (WaitForSingleObject(stop_.value,5)==WAIT_TIMEOUT) {
+                    const auto requested=requested_.load();
+                    while (next<=requested && next<profiles_.size()) {
+                        if (next!=0) { editor.replace(profiles_[next].configuration); }
+                        preview.submit(); const auto deadline=GetTickCount64()+2000;
+                        while (true) {
+                            const auto reply=preview.poll();
+                            if (reply.feedback==PreviewFeedback::applied) { break; }
+                            if (reply.feedback==PreviewFeedback::rejected || reply.feedback==PreviewFeedback::disconnected) {
+                                throw std::runtime_error("Preview update failed: "+reply.detail);
+                            }
+                            require(GetTickCount64()<deadline && WaitForSingleObject(stop_.value,5)==WAIT_TIMEOUT,
+                                    "Preview acknowledgement timed out");
+                        }
+                        acknowledged_frames_[next]=capture_frames_.load();
+                        require(editor.applied()==editor.snapshot(),"Audio acknowledged a different edit");
+                        if (save_update_ && next==1) {
+                            ComPtr<IPropertyStore> writer; check(open_saved_store(device.Get(),STGM_READWRITE,&writer),"Open settings for Save");
+                            save_profile_settings(editor,*writer.Get());
+                            require(!editor.dirty(),"Successful Save did not advance editor checkpoint");
+                        }
+                        ++next; applied_.store(next);
+                    }
+                }
+                saved.Reset(); check(open_saved_store(device.Get(),STGM_READ,&saved),"Reopen saved settings after preview");
+                require(read_saved_profile(*saved.Get())==std::optional{profiles_[save_update_ ? 1 : 0]},"Unsaved preview altered the saved settings");
+                saved_verified_=true;
+            } catch (...) { error_=std::current_exception(); }
+            if (SUCCEEDED(com)) { CoUninitialize(); }
+        });
+    }
+    void progress(std::size_t frames, UINT32 rate) override {
+        rate_=rate; capture_frames_.store(frames);
+        requested_.store(frames>=static_cast<std::size_t>(rate)*7 ? 2u : frames>=static_cast<std::size_t>(rate)*3 ? 1u : 0u);
+    }
+    void finish() override {
+        stop(); if (error_) { std::rethrow_exception(error_); }
+        require(applied_.load()==3,"All preview revisions were not acknowledged");
+        for (std::size_t i=0; i<3; ++i) {
+            require(acknowledged_frames_[i]<static_cast<std::uint64_t>(rate_)*(1+i*4),"Preview was acknowledged after its analysis window began");
+        }
+        require(contour::eq::read_profile_file(saved_path_)==std::optional{saved_text_},"Preview altered the saved profile");
+    }
+    void report(std::ostream& out) const override {
+        wchar_t guid[40]{}; StringFromGUID2(runtime_,guid,40);
+        out<<",\"Control\":{\"Elevated\":"<<(elevated_ ? "true" : "false")<<",\"Restricted\":"<<(restricted_ ? "true" : "false")
+           <<",\"Runtime\":"<<json_string(guid)<<",\"SourceProfileUnchanged\":true,\"SavedUpdate\":"<<(save_update_ ? "true" : "false")
+           <<",\"SavedSettingsVerified\":"<<(saved_verified_ ? "true" : "false")<<",\"AcknowledgedAtFrames\":["
+           <<acknowledged_frames_[0]<<','<<acknowledged_frames_[1]<<','<<acknowledged_frames_[2]<<"]}";
+    }
+private:
+    void stop() { if (worker_.joinable()) { SetEvent(stop_.value); worker_.join(); } }
+    std::wstring endpoint_;
+    std::filesystem::path saved_path_;
+    std::string saved_text_;
+    std::array<contour::eq::Profile,3> profiles_;
+    Event stop_;
+    std::thread worker_;
+    std::atomic<unsigned> requested_{0},applied_{0};
+    std::atomic<std::uint64_t> capture_frames_{0};
+    std::array<std::uint64_t,3> acknowledged_frames_{};
+    UINT32 rate_=0;
+    GUID runtime_{};
+    bool elevated_=false,restricted_=false;
+    bool save_update_=false,saved_verified_=false;
+    std::exception_ptr error_;
+};
+
+int measure(const wchar_t* endpoint_id, const std::filesystem::path& output_path, Updates* updates = nullptr) {
     require(!std::filesystem::exists(output_path), "Output already exists; use a new measurement filename");
     const Com com;
     ComPtr<IMMDeviceEnumerator> enumerator;
@@ -360,7 +480,9 @@ int measure(const wchar_t* endpoint_id, const std::filesystem::path& output_path
         report << "{\"AnalysisStartSeconds\":" << 1+phase*4 << ",\"Channels\":";
         write_channels(phases[phase]); report << '}';
     }
-    report << "]}\n";
+    report << ']';
+    if (updates) { updates->report(report); }
+    report << "}\n";
     report.close();
     require(!report.fail(), "Failed writing measurement report");
     std::cout << (valid ? "Measurement valid\n" : "Measurement invalid: check competing audio, mute/volume, or discontinuities\n");
@@ -376,11 +498,17 @@ int wmain(int argc, wchar_t* argv[]) {
             ProfileUpdates updates(argv[4],argv[5],argv[6]);
             return measure(argv[2],argv[3],&updates);
         }
+        if ((argc == 7 || (argc == 8 && std::wstring_view(argv[7]) == L"--save-update")) && std::wstring_view(argv[1]) == L"measure-control") {
+            ControlUpdates updates(argv[2],argv[4],argv[5],argv[6],argc==8);
+            return measure(argv[2],argv[3],&updates);
+        }
         std::cout << "Usage: contour-audio-test measure <playback-endpoint-ID> <new-report.json>\n"
                      "Plays three seconds of -40 dBFS stereo tones and measures WASAPI loopback.\n"
                      "Does not change volume. Saves aggregate statistics, not captured audio.\n"
                      "       contour-audio-test measure-updates <endpoint> <new-report.json> <installed.contour> <update.contour> <bypass.contour>\n"
                      "Keeps one stream open for eleven seconds; publishes the update at 3 s and bypass at 7 s.\n"
+                     "       contour-audio-test measure-control <endpoint> <new-report.json> <initial.contour> <update.contour> <bypass.contour> [--save-update]\n"
+                     "Uses the Windows effects store, confirming each preview before its measurement window.\n"
                      "       contour-audio-test --self-test (no playback)\n";
         return argc == 2 && std::wstring_view(argv[1]) == L"--help" ? 0 : 2;
     } catch (const std::exception& error) {

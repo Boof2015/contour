@@ -4,11 +4,17 @@
 param(
     [Parameter(Mandatory=$true)][string] $PlanFile,
     [Parameter(Mandatory=$true)][string] $OutputDirectory,
-    [switch] $PeqTest
+    [switch] $PeqTest,
+    [string] $ControlPlanFile = '',
+    [switch] $SaveDuringPreview
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Deployment.ps1')
+. (Join-Path $PSScriptRoot 'ControlContext.ps1')
+$controlTest = -not [string]::IsNullOrWhiteSpace($ControlPlanFile)
+if ($controlTest) { $PeqTest = $true }
+if ($SaveDuringPreview -and -not $controlTest) { throw 'SaveDuringPreview requires a context plan.' }
 
 function Invoke-ExperimentChild([string] $Executable, [string[]] $Arguments, [string] $Label, [int] $TimeoutSeconds = 30) {
     # Arguments here are paths/IDs produced by this experiment, never shell code.
@@ -33,7 +39,7 @@ function Invoke-ExperimentChild([string] $Executable, [string[]] $Arguments, [st
     if ($process.ExitCode -ne 0) { throw "$Label failed with exit code $($process.ExitCode)." }
 }
 
-function Restart-ExperimentAudio {
+function Invoke-WithStoppedAudio([scriptblock] $Action) {
     $audio = Get-Service -Name Audiosrv
     if ($audio.Status -ne 'Running') { throw 'Windows Audio was not running before the requested rebuild.' }
     $dependents = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
@@ -44,7 +50,11 @@ function Restart-ExperimentAudio {
     }
     Remember-RunningDependents $audio
     Write-Output ('Rebuilding Windows Audio; active dependents: '+($dependents -join ', '))
-    try { Stop-Service -Name Audiosrv -Force -ErrorAction Stop }
+    try {
+        Stop-Service -Name Audiosrv -Force -ErrorAction Stop
+        (Get-Service Audiosrv).WaitForStatus('Stopped',[TimeSpan]::FromSeconds(15))
+        & $Action
+    }
     finally {
         Start-Service -Name Audiosrv -ErrorAction Stop
         (Get-Service Audiosrv).WaitForStatus('Running',[TimeSpan]::FromSeconds(15))
@@ -53,6 +63,17 @@ function Restart-ExperimentAudio {
             (Get-Service $name).WaitForStatus('Running',[TimeSpan]::FromSeconds(15))
         }
     }
+}
+function Restart-ExperimentAudio { Invoke-WithStoppedAudio {} }
+
+function Invoke-WithDeploymentLock([scriptblock] $Action) {
+    $mutex = [Threading.Mutex]::new($false,'Global\ContourLabDeployment')
+    $owns = $false
+    try {
+        try { $owns = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $owns = $true }
+        if (-not $owns) { throw 'Another Contour deployment is active.' }
+        & $Action
+    } finally { if ($owns) { $mutex.ReleaseMutex() }; $mutex.Dispose() }
 }
 
 function Measure-Experiment([string] $Label) {
@@ -64,6 +85,8 @@ function Measure-Experiment([string] $Label) {
 
 $transcript = $false
 $traceStarted = $false
+$contextStore = $null
+$contextJournal = $null
 $outcome = [ordered]@{Schema=1;Passed=$false;Restored=$false;Errors=@();Measurements=@();LoadedModules=@()}
 try {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -86,6 +109,16 @@ try {
     $powershell = Join-Path $PSHOME 'powershell.exe'
     $installer = Join-Path $PSScriptRoot 'contour-lab.ps1'
     $journalPath = Join-Path $plan.Package 'journal.json'
+    if ($controlTest) {
+        $contextPlan = Get-Content -LiteralPath $ControlPlanFile -Raw | ConvertFrom-Json
+        Assert-ControlContextPlan $contextPlan
+        if ($contextPlan.EndpointId -cne $plan.Endpoint.Id) { throw 'Context and APO plans target different endpoints.' }
+        $root = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine,[Microsoft.Win32.RegistryView]::Registry64)
+        $contextStore = [Contour.Deployment.RegistryStore]::new($root,$true)
+        Assert-ContourBaseline $contextStore $plan
+        $contextJournalPath = Join-Path $OutputDirectory 'context-journal.json'
+        $outcome.ControlTest = $true
+    }
     $initialExpected = @(-6.0,-6.0)
     if ($PeqTest) {
         # These repository fixtures place each channel's peak at its test-tone
@@ -109,15 +142,56 @@ try {
         '-o',$traceFile,'-ets') 'start-trace'
     $traceStarted = $true
     try {
-        Invoke-ExperimentChild $powershell @('-NoProfile','-ExecutionPolicy','RemoteSigned','-File',$installer,
-            '-Action','Install','-File',$PlanFile,'-UseExistingUnprotectedAudio') 'install'
+        if ($controlTest) {
+            $contextJournal = New-ControlContextJournal $contextPlan
+            Save-ContourJournal $contextJournal $contextJournalPath -CreateNew
+            Invoke-WithDeploymentLock { Invoke-ControlContextApply $contextStore $contextJournal $contextJournalPath -AllowRestorePrivilege }
+            $contextJournal.SavedProfileCleanup=$true
+            Save-ContourJournal $contextJournal $contextJournalPath
+            [Contour.Deployment.DurableFile]::Save((Join-Path $OutputDirectory 'save-ready.json'),'{"Ready":true}',$true)
+            $deadline=[DateTime]::UtcNow.AddSeconds(180)
+            while (-not (Test-Path -LiteralPath (Join-Path $OutputDirectory 'save-finish'))) {
+                if ([DateTime]::UtcNow -ge $deadline) { throw 'Ordinary-user initial Save window expired; restoring.' }
+                Start-Sleep -Milliseconds 250
+            }
+            $seed=Get-Content -LiteralPath (Join-Path $OutputDirectory 'initial-save.json') -Raw | ConvertFrom-Json
+            if (-not $seed.Saved -or -not $seed.Verified -or $seed.Elevated -or $seed.Restricted) { throw 'Expected a verified ordinary-user initial Save.' }
+            # Reinspect after provisioning so the APO install guards include the
+            # context. Keep the reviewed ID, binary and exact registration writes.
+            $info = & (Join-Path (Split-Path -Parent $plan.SourceDll) 'contour-deploy-info.exe') $plan.SourceDll $plan.Endpoint.Id | ConvertFrom-Json
+            if ($LASTEXITCODE -ne 0) { throw 'Deployment reinspection failed.' }
+            $refreshed = New-ContourPlan $contextStore $info $plan.SourceDll $plan.DllSha256 $plan.Id
+            if (($refreshed.Changes | ConvertTo-Json -Depth 12 -Compress) -cne ($plan.Changes | ConvertTo-Json -Depth 12 -Compress)) { throw 'APO registration changed after context provisioning.' }
+            $plan = $refreshed
+            $PlanFile = Join-Path $OutputDirectory 'attachment-plan.json'
+            [Contour.Deployment.DurableFile]::Save($PlanFile,($plan | ConvertTo-Json -Depth 30),$true)
+        }
+        $installArguments = @('-NoProfile','-ExecutionPolicy','RemoteSigned','-File',$installer,
+            '-Action','Install','-File',$PlanFile,'-UseExistingUnprotectedAudio')
+        if ($PeqTest -and -not $controlTest) { $installArguments += @('-InitialProfile',$initialProfile) }
+        Invoke-ExperimentChild $powershell $installArguments 'install'
         if ($PeqTest) {
             $installedProfile = Join-Path $plan.Package 'profile.contour'
-            Invoke-ExperimentChild $inspector @('--apply',$initialProfile,$installedProfile) 'load-initial'
+            if (-not $controlTest) { $initialHash = (Get-FileHash -LiteralPath $installedProfile -Algorithm SHA256).Hash }
         }
         Restart-ExperimentAudio
         Measure-Experiment 'attached'
-        if ($PeqTest) {
+        if ($controlTest) {
+            [Contour.Deployment.DurableFile]::Save((Join-Path $OutputDirectory 'ready.json'),'{"Ready":true}',$true)
+            $deadline = [DateTime]::UtcNow.AddSeconds(180)
+            while (-not (Test-Path -LiteralPath (Join-Path $OutputDirectory 'finish'))) {
+                if ([DateTime]::UtcNow -ge $deadline) { throw 'Ordinary-user preview test window expired; restoring.' }
+                Start-Sleep -Milliseconds 250
+            }
+            $live = Get-Content -LiteralPath (Join-Path $OutputDirectory 'live-updates.json') -Raw | ConvertFrom-Json
+            if (-not $live.Valid -or $live.Control.Elevated -or $live.Control.Restricted -or
+                -not $live.Control.SourceProfileUnchanged -or -not $live.Control.SavedSettingsVerified -or
+                $live.Control.SavedUpdate -ne $SaveDuringPreview.IsPresent) { throw 'Expected a successful ordinary-user preview/save test.' }
+            $outcome.SaveDuringPreview=$SaveDuringPreview.IsPresent
+            $outcome.SavedSettingsVerified=$live.Control.SavedSettingsVerified
+            $outcome.NoLegacyProfileFile=-not (Test-Path -LiteralPath $installedProfile)
+            if (-not $outcome.NoLegacyProfileFile) { throw 'Settings experiment unexpectedly has a legacy profile file.' }
+        } elseif ($PeqTest) {
             Invoke-ExperimentChild $verifier @('measure-updates',$plan.Endpoint.Id,
                 (Join-Path $OutputDirectory 'live-updates.json'),$installedProfile,$updatedProfile,$bypassProfile) 'live-updates' 25
             Invoke-ExperimentChild $inspector @('--apply',$initialProfile,$installedProfile) 'restore-initial-profile'
@@ -133,13 +207,33 @@ try {
         }
         Restart-ExperimentAudio
         Measure-Experiment 'attached-after-rebuild'
+        if ($controlTest) {
+            $expectedSaved=if ($SaveDuringPreview) { $updatedProfile } else { $initialProfile }
+            Invoke-ExperimentChild (Join-Path (Split-Path -Parent $plan.SourceDll) 'contour-control-probe.exe') @(
+                'verify-saved',$plan.Endpoint.Id,$expectedSaved,(Join-Path $OutputDirectory 'saved-after-rebuild.json')) 'verify-saved-after-rebuild'
+        }
     } finally {
-        if (Test-Path -LiteralPath $journalPath) {
-            Invoke-ExperimentChild $powershell @('-NoProfile','-ExecutionPolicy','RemoteSigned','-File',
-                (Join-Path $plan.Package 'contour-lab.ps1'),'-Action','Restore','-File',$journalPath) 'restore'
-            Restart-ExperimentAudio
-            $journal = Get-Content -LiteralPath $journalPath -Raw | ConvertFrom-Json
-            $outcome.Restored = $journal.State -eq 'RestoredPendingGraphRebuild'
+        if ((Test-Path -LiteralPath $journalPath) -or $null -ne $contextJournal) {
+            # Stop workers before removing the volatile request/status values.
+            Invoke-WithStoppedAudio {
+                if (Test-Path -LiteralPath $journalPath) {
+                    Invoke-ExperimentChild $powershell @('-NoProfile','-ExecutionPolicy','RemoteSigned','-File',
+                        (Join-Path $plan.Package 'contour-lab.ps1'),'-Action','Restore','-File',$journalPath) 'restore'
+                    $journal = Get-Content -LiteralPath $journalPath -Raw | ConvertFrom-Json
+                    $outcome.Restored = $journal.State -eq 'RestoredPendingGraphRebuild'
+                }
+                if ($null -ne $contextJournal) {
+                    Invoke-WithDeploymentLock {
+                        $outcome.ContextRestored = Invoke-ControlContextRestore $contextStore $contextJournal $contextJournalPath
+                        if (-not $outcome.ContextRestored) { throw ('Context restoration conflict: '+($contextJournal.Conflicts -join '; ')) }
+                        $fx = (Get-EndpointPath $contextPlan.EndpointId)+'\FxProperties'
+                        $outcome.BaselineMatches = $contextStore.Snapshot($fx) -ceq $contextPlan.Baseline
+                        $outcome.ParentSecurityMatches = $contextStore.Security($fx) -ceq $contextPlan.ParentSecurity
+                        $outcome.ProtectedAudioOverrideUnchanged = Test-RawEqual ($contextStore.Read($script:AudioSettings,'DisableProtectedAudioDG')) $plan.ProtectedAudioOverride
+                        if (-not $outcome.BaselineMatches -or -not $outcome.ParentSecurityMatches -or -not $outcome.ProtectedAudioOverrideUnchanged) { throw 'Endpoint baseline, permissions, or protected-audio setting changed.' }
+                    }
+                }
+            }
             Measure-Experiment 'restored'
         }
     }
@@ -151,7 +245,9 @@ try {
             $measurement.EndpointVolumeBefore -ne $baseline.EndpointVolumeBefore -or $measurement.SessionVolume -ne $baseline.SessionVolume) {
             throw 'Endpoint, format, or volume changed between measurements.'
         }
-        $expected = if ($label -eq 'restored') { @(0.0,0.0) } else { $initialExpected }
+        $expected = if ($label -eq 'restored') { @(0.0,0.0) }
+            elseif ($label -eq 'attached-after-rebuild' -and $SaveDuringPreview) { @(-4.0,-10.0) }
+            else { $initialExpected }
         $deltas = @()
         for ($channel=0; $channel -lt 2; ++$channel) {
             $delta = 20 * [Math]::Log10($measurement.Channels[$channel].Amplitude / $baseline.Channels[$channel].Amplitude)
@@ -187,6 +283,7 @@ try {
     Write-Output $_.Exception.Message
     Write-Output $_.ScriptStackTrace
 } finally {
+    if ($null -ne $contextStore) { $contextStore.Dispose() }
     if ($traceStarted) {
         try {
             Invoke-ExperimentChild $logman @('stop',$traceName,'-ets') 'stop-trace'

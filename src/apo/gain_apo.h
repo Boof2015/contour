@@ -4,6 +4,9 @@
 #include <baseaudioprocessingobject.h>
 #include <contour/channel_gain.h>
 #include <contour/live_eq.h>
+#include <contour/live_control.h>
+#include <objidl.h>
+#include <wrl/client.h>
 #include <filesystem>
 #include <string>
 
@@ -63,6 +66,7 @@ private:
     void prepare_runtime();
     void stop_worker() noexcept;
     void check_profile();
+    void control_worker() noexcept;
     static unsigned __stdcall worker_entry(void* context) noexcept;
     InnerUnknown inner_{*this};
     // Borrowed controlling identity. AddRef here would create an ownership cycle.
@@ -78,7 +82,11 @@ private:
     std::filesystem::path profile_path_;
     std::string seen_profile_, last_profile_error_;
     std::uint64_t profile_revision_ = 0;
+    std::optional<eq::ProcessingFingerprint> startup_fingerprint_;
     HANDLE worker_stop_ = nullptr, worker_ = nullptr;
+    Microsoft::WRL::ComPtr<IGlobalInterfaceTable> control_git_;
+    DWORD control_cookie_ = 0;
+    DWORD saved_cookie_ = 0;
     UINT32 max_input_frames_ = 0;
     UINT32 max_output_frames_ = 0;
     // Only fixed-size atomic updates in the callback. ETW publication happens

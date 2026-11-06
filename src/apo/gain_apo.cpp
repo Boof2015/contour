@@ -2,6 +2,7 @@
 #include "diagnostics.h"
 #include <contour/apo_ids.h>
 #include <contour/profile.h>
+#include <contour/live_control.h>
 #include <process.h>
 
 #include <array>
@@ -98,6 +99,8 @@ GainApo::GainApo(bool post_mix, IUnknown* outer)
 
 GainApo::~GainApo() {
     stop_worker();
+    if (control_cookie_) { control_git_->RevokeInterfaceFromGlobal(control_cookie_); }
+    if (saved_cookie_) { control_git_->RevokeInterfaceFromGlobal(saved_cookie_); }
     report_processing_summary("Destroy");
     InterlockedDecrement(&module_references);
 }
@@ -180,8 +183,8 @@ HRESULT GainApo::initialize_core(UINT32 size, BYTE* data) {
     if (size == 0 && data == nullptr) {
         return CBaseAudioProcessingObject::Initialize(0, nullptr);
     }
-    // This prototype implements the legacy LFX/GFX initialization contract.
-    // The single-endpoint lab package owns its sibling profile file.
+    // Keep the verified legacy LFX/GFX contract. On Windows 11 the endpoint can
+    // also expose Contour's explicitly provisioned effects settings context.
     if (data == nullptr || size != sizeof(APOInitSystemEffects)) {
         return E_INVALIDARG;
     }
@@ -192,6 +195,31 @@ HRESULT GainApo::initialize_core(UINT32 size, BYTE* data) {
     }
     if (header.clsid != m_pRegProperties->clsid) {
         return APOERR_INVALID_APO_CLSID;
+    }
+    APOInitSystemEffects init{};
+    std::memcpy(&init,data,sizeof(init));
+    if (post_mix_ && init.pDeviceCollection) {
+        Microsoft::WRL::ComPtr<IPropertyStore> store;
+        const auto opened=eq::open_control_store(init.pDeviceCollection,&store);
+        TraceLoggingWrite(diagnostic_provider,"ControlStoreOpen",TraceLoggingHResult(opened,"Result"));
+        if (SUCCEEDED(opened)) {
+            auto result=CoCreateInstance(CLSID_StdGlobalInterfaceTable,nullptr,CLSCTX_INPROC_SERVER,
+                IID_PPV_ARGS(&control_git_));
+            if (FAILED(result)) { return result; }
+            result=control_git_->RegisterInterfaceInGlobal(store.Get(),__uuidof(IPropertyStore),&control_cookie_);
+            if (FAILED(result)) { return result; }
+        }
+        store.Reset();
+        const auto saved_opened=eq::open_saved_store(init.pDeviceCollection,STGM_READ,&store);
+        TraceLoggingWrite(diagnostic_provider,"SavedStoreOpen",TraceLoggingHResult(saved_opened,"Result"));
+        if (SUCCEEDED(saved_opened)) {
+            if (!control_git_) {
+                const auto created=CoCreateInstance(CLSID_StdGlobalInterfaceTable,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&control_git_));
+                if (FAILED(created)) { return created; }
+            }
+            const auto registered=control_git_->RegisterInterfaceInGlobal(store.Get(),__uuidof(IPropertyStore),&saved_cookie_);
+            if (FAILED(registered)) { return registered; }
+        }
     }
     const auto result = CBaseAudioProcessingObject::Initialize(0, nullptr);
     if (SUCCEEDED(result)) { system_effect_ = true; }
@@ -266,31 +294,49 @@ void GainApo::stop_worker() noexcept {
 void GainApo::prepare_runtime() {
     stop_worker();
     profile_revision_ = 0; seen_profile_.clear(); last_profile_error_.clear();
-    // Preserve the already-verified -6 dB lab behavior until a profile is
-    // explicitly supplied. This is a lab default, not an extra gain on PEQ.
+    // The settings path starts neutral when empty/unreadable/invalid. The
+    // original file-based lab path retains its established -6 dB default.
+    const bool settings_mode=control_cookie_ || saved_cookie_;
     eq::Layer fallback; fallback.gain_db = -6;
-    auto* initial = eq::ResidentBank::prepare({{fallback}}, sample_rate_, channels_, 0);
+    const auto initial_configuration=settings_mode ? eq::Configuration{} : eq::Configuration{{fallback}};
+    auto* initial = eq::ResidentBank::prepare(initial_configuration, sample_rate_, channels_, 0);
     live_eq_.initialize(initial, static_cast<std::uint32_t>(sample_rate_*0.020));
+    startup_fingerprint_.reset();
+    try { startup_fingerprint_=eq::processing_fingerprint(initial_configuration,sample_rate_,channels_); } catch (...) {}
     if (!system_effect_) { return; }
-    wchar_t filename[32768]{};
-    const auto size = GetModuleFileNameW(module_instance, filename, 32768);
-    if (size == 0 || size >= 32768) { throw std::runtime_error("Cannot locate APO package"); }
-    profile_path_ = std::filesystem::path(filename).parent_path()/L"profile.contour";
     try {
-        const auto text = eq::read_profile_file(profile_path_);
-        if (text) {
-            seen_profile_ = *text;
-            const auto profile = eq::parse_profile(*text);
-            if (profile.channels != channels_) { throw std::invalid_argument("Profile channel layout does not match endpoint"); }
-            auto* bank = eq::ResidentBank::prepare(profile.configuration, sample_rate_, channels_, 1);
+        std::optional<eq::Profile> profile;
+        if (settings_mode) {
+            Microsoft::WRL::ComPtr<IPropertyStore> saved;
+            if (!saved_cookie_ || FAILED(control_git_->GetInterfaceFromGlobal(saved_cookie_,IID_PPV_ARGS(&saved)))) {
+                throw std::runtime_error("Cannot access saved endpoint settings");
+            }
+            profile=eq::read_saved_profile(*saved.Get());
+        } else {
+            wchar_t filename[32768]{};
+            const auto size=GetModuleFileNameW(module_instance,filename,32768);
+            if (size==0 || size>=32768) { throw std::runtime_error("Cannot locate APO package"); }
+            profile_path_=std::filesystem::path(filename).parent_path()/L"profile.contour";
+            const auto text=eq::read_profile_file(profile_path_);
+            if (text) { seen_profile_=*text; profile=eq::parse_profile(*text); }
+        }
+        if (profile) {
+            if (profile->channels != channels_) { throw std::invalid_argument("Profile channel layout does not match endpoint"); }
+            auto* bank = eq::ResidentBank::prepare(profile->configuration, sample_rate_, channels_, 1);
             live_eq_.initialize(bank, static_cast<std::uint32_t>(sample_rate_*0.020));
+            startup_fingerprint_.reset();
+            try { startup_fingerprint_=eq::processing_fingerprint(profile->configuration,sample_rate_,channels_); } catch (...) {}
             profile_revision_ = 1;
-            TraceLoggingWrite(diagnostic_provider, "ProfileLoaded", TraceLoggingUInt64(profile_revision_, "Revision"));
+            TraceLoggingWrite(diagnostic_provider, "ProfileLoaded", TraceLoggingUInt64(profile_revision_, "Revision"), TraceLoggingBoolean(settings_mode,"FromSettingsStore"));
         }
     } catch (const std::exception& error) {
         last_profile_error_ = error.what();
         TraceLoggingWrite(diagnostic_provider, "ProfileRejected", TraceLoggingString(error.what(), "Reason"));
     }
+    // Settings mode never watches the legacy package file, including when
+    // preview access is unavailable. Save takes effect at the next lock;
+    // immediate audition remains an explicit volatile preview operation.
+    if (settings_mode && !control_cookie_) { return; }
     worker_stop_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (!worker_stop_) { throw std::runtime_error("Cannot create profile worker stop event"); }
     worker_ = reinterpret_cast<HANDLE>(_beginthreadex(nullptr, 0, worker_entry, this, 0, nullptr));
@@ -313,6 +359,7 @@ void GainApo::check_profile() {
 
 unsigned __stdcall GainApo::worker_entry(void* context) noexcept {
     auto& self = *static_cast<GainApo*>(context);
+    if (self.control_cookie_) { self.control_worker(); return 0; }
     auto observed = self.live_eq_.applied_revision();
     while (WaitForSingleObject(self.worker_stop_, 100) == WAIT_TIMEOUT) {
         try { self.check_profile(); }
@@ -333,6 +380,39 @@ unsigned __stdcall GainApo::worker_entry(void* context) noexcept {
         }
     }
     return 0;
+}
+
+void GainApo::control_worker() noexcept {
+    const auto com=CoInitializeEx(nullptr,COINIT_MULTITHREADED);
+    if (FAILED(com)) { return; }
+    {
+        Microsoft::WRL::ComPtr<IPropertyStore> store;
+        try {
+            const auto result=control_git_->GetInterfaceFromGlobal(control_cookie_,IID_PPV_ARGS(&store));
+            if (FAILED(result)) { throw std::runtime_error("Cannot marshal effects settings store to control worker"); }
+            eq::PreviewProcessor processor(live_eq_,sample_rate_,channels_,last_profile_error_,startup_fingerprint_);
+            std::string seen;
+            const auto report=[&](const eq::PreviewStatus& status) {
+                eq::write_control_value(*store.Get(),eq::preview_status_key,eq::encode_status(status));
+            };
+            report(processor.poll());
+            while (WaitForSingleObject(worker_stop_,100)==WAIT_TIMEOUT) {
+                try {
+                    const auto request=eq::read_control_value(*store.Get(),eq::preview_request_key,eq::max_request_bytes);
+                    if (request && *request!=seen) { seen=*request; processor.submit(*request); }
+                    report(processor.poll());
+                } catch (const std::exception& e) {
+                    TraceLoggingWrite(diagnostic_provider,"ControlUpdateFailed",TraceLoggingString(e.what(),"Reason"));
+                }
+            }
+            // Avoid overwriting the status of a newer instance at shutdown.
+            const auto status=eq::read_control_value(*store.Get(),eq::preview_status_key,eq::max_status_bytes);
+            if (status && eq::decode_status(*status).runtime==processor.poll().runtime) { report(processor.stop()); }
+        } catch (const std::exception& e) {
+            TraceLoggingWrite(diagnostic_provider,"ControlWorkerFailed",TraceLoggingString(e.what(),"Reason"));
+        } catch (...) {}
+    }
+    CoUninitialize();
 }
 
 HRESULT GainApo::ValidateAndCacheConnectionInfo(UINT32 input_count,

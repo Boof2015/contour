@@ -1,6 +1,7 @@
 #pragma once
 #include <contour/peq.h>
 #include <atomic>
+#include <limits>
 
 namespace contour::eq {
 
@@ -37,12 +38,18 @@ public:
     // Serialized with the audio callback, as required by the APO Reset contract.
     void reset() noexcept;
     std::uint64_t applied_revision() const noexcept { return applied_.load(std::memory_order_acquire); }
+    // Diagnostic evidence: loading a bank is distinct from processing frames.
+    // Reserved values never identify a bank. Read on the control thread.
+    static constexpr auto not_processed=std::numeric_limits<std::uint64_t>::max();
+    static constexpr auto transitioning=not_processed-1;
+    std::uint64_t processed_revision() const noexcept { return processed_.load(std::memory_order_acquire); }
 private:
     ResidentBank* current_ = nullptr;
     ResidentBank* incoming_ = nullptr;
     std::atomic<ResidentBank*> pending_{nullptr};
     std::atomic<ResidentBank*> retired_{nullptr};
     std::atomic<std::uint64_t> applied_{0};
+    std::atomic<std::uint64_t> processed_{not_processed};
     std::uint32_t fade_frames_ = 2, progress_ = 0;
     std::uint32_t channels_ = 0;
 };
