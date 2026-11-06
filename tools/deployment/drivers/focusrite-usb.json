@@ -1,0 +1,13 @@
+{
+  "Schema": 1,
+  "Kind": "ContourRegistrationExtension",
+  "Name": "focusrite-usb",
+  "Description": "Contour registration for Focusrite USB Audio",
+  "ExtensionId": "{C31E71B0-BF59-4019-943F-F2ED477DC1C8}",
+  "HardwareIds": ["FocusriteUSB\\Audio&Adapter"],
+  "ObservedDriver": {
+    "Provider": "Focusrite Audio Engineering, Ltd.",
+    "Service": "FocusriteUsbAudio",
+    "Version": "4.150.0.432"
+  }
+}

@@ -28,6 +28,12 @@ using test::expect_near;
 using test::require;
 using namespace contour::apo;
 
+CLSID test_pre_clsid = pre_mix_clsid;
+CLSID test_post_clsid = post_mix_clsid;
+bool test_component = false;
+double default_db = -6.0;
+double default_gain() { return std::pow(10.0, default_db / 20.0); }
+
 void hr(HRESULT actual, HRESULT expected, std::string_view operation) {
     if (actual != expected) {
         std::ostringstream message;
@@ -188,13 +194,16 @@ private:
 };
 
 void test_identity(const Module& module) {
+    require(component_pre_mix_clsid != pre_mix_clsid && component_pre_mix_clsid != post_mix_clsid &&
+        component_post_mix_clsid != pre_mix_clsid && component_post_mix_clsid != post_mix_clsid &&
+        component_pre_mix_clsid != component_post_mix_clsid, "new registration must use distinct identities");
     hr(module.can_unload(), S_OK, "initially unloadable");
     ComPtr<IClassFactory> unknown;
     hr(module.get_class(GUID_NULL, IID_PPV_ARGS(&unknown)), CLASS_E_CLASSNOTAVAILABLE,
        "unknown class");
-    hr(module.get_class(pre_mix_clsid, __uuidof(IClassFactory), nullptr), E_POINTER,
+    hr(module.get_class(test_pre_clsid, __uuidof(IClassFactory), nullptr), E_POINTER,
        "null factory output");
-    for (const auto& id : {pre_mix_clsid, post_mix_clsid}) {
+    for (const auto& id : {test_pre_clsid, test_post_clsid}) {
         auto factory = module.factory(id);
         hr(module.can_unload(), S_FALSE, "factory keeps DLL loaded");
         hr(factory->LockServer(TRUE), S_OK, "lock server");
@@ -251,7 +260,7 @@ public:
 };
 
 void test_aggregation(const Module& module) {
-    for (const auto& id : {pre_mix_clsid, post_mix_clsid}) {
+    for (const auto& id : {test_pre_clsid, test_post_clsid}) {
         AggregateHost outer;
         auto factory = module.factory(id);
         ComPtr<IAudioProcessingObject> invalid;
@@ -295,7 +304,7 @@ void test_aggregation(const Module& module) {
             auto source = property(input.data(), 8, BUFFER_VALID);
             auto target = property(output.data(), 0, BUFFER_INVALID);
             instance.process(source, target);
-            const double gain = id == post_mix_clsid ? std::pow(10.0, -6.0 / 20.0) : 1.0;
+            const double gain = id == test_post_clsid ? default_gain() : 1.0;
             for (int i = 0; i < 16; ++i) { expect_near(output.data()[i], 0.25 * gain, "aggregate audio"); }
             instance.unlock();
             input.guards();
@@ -308,7 +317,7 @@ void test_aggregation(const Module& module) {
 }
 
 void test_initialization(const Module& module) {
-    for (const auto& id : {pre_mix_clsid, post_mix_clsid}) {
+    for (const auto& id : {test_pre_clsid, test_post_clsid}) {
         Instance instance(module, id, false);
         BYTE dummy = 0;
         hr(instance.apo->Initialize(1, nullptr), E_INVALIDARG, "missing init data");
@@ -337,7 +346,7 @@ void test_initialization(const Module& module) {
 }
 
 void test_negotiation(const Module& module) {
-    Instance instance(module, post_mix_clsid);
+    Instance instance(module, test_post_clsid);
     for (const auto channels : {1U, 2U, 6U, 8U, 32U}) {
         for (const float rate : {44100.0F, 48000.0F, 96000.0F, 192000.0F}) {
             auto media = format(channels, rate);
@@ -379,7 +388,7 @@ void test_negotiation(const Module& module) {
 }
 
 void test_lifecycle(const Module& module) {
-    Instance instance(module, post_mix_clsid, false);
+    Instance instance(module, test_post_clsid, false);
     auto media = format();
     Buffer input(64 * 2), output(64 * 2);
     auto in = descriptor(media.Get(), input.data(), 64);
@@ -417,7 +426,7 @@ void test_lifecycle(const Module& module) {
     auto source = property(input.data(), 64, BUFFER_VALID);
     auto target = property(output.data(), 0, BUFFER_INVALID);
     instance.process(source, target);
-    expect_near(output.data()[63], std::pow(10.0, -6.0 / 20.0), "relocked mono gain");
+    expect_near(output.data()[63], default_gain(), "relocked mono gain");
     require(output.data()[64] == Buffer::sentinel, "relocked mono frame boundary");
     input.guards();
     output.guards();
@@ -425,7 +434,7 @@ void test_lifecycle(const Module& module) {
 
 void test_processing(const Module& module, REFCLSID id, bool inplace) {
     constexpr UINT32 capacity = 257;
-    const double gain = id == pre_mix_clsid ? 1.0 : std::pow(10.0, -6.0 / 20.0);
+    const double gain = id == test_pre_clsid ? 1.0 : default_gain();
     for (const UINT32 channels : {1U, 2U, 6U, 8U, 32U}) {
         auto media = format(channels);
         Buffer input(capacity * channels), output(capacity * channels);
@@ -464,7 +473,7 @@ void test_processing(const Module& module, REFCLSID id, bool inplace) {
 }
 
 void test_flags(const Module& module) {
-    Instance instance(module, post_mix_clsid);
+    Instance instance(module, test_post_clsid);
     auto media = format();
     Buffer input(32), output(32);
     auto in = descriptor(media.Get(), input.data(), 16);
@@ -499,7 +508,7 @@ void test_flags(const Module& module) {
     APO_CONNECTION_PROPERTY_V2 version2{source, 0};
     instance.process(version2.property, target);
     expect_near(output.data()[0], 0.0, "no right-to-left crosstalk");
-    expect_near(output.data()[1], std::pow(10.0, -6.0 / 20.0), "right channel impulse");
+    expect_near(output.data()[1], default_gain(), "right channel impulse");
     instance.unlock();
     instance.process(source, target);
     require(target.u32BufferFlags == BUFFER_INVALID && target.u32ValidFrameCount == 0,
@@ -512,7 +521,7 @@ void test_chain(const Module& module) {
     constexpr UINT32 frames = 480;
     auto media = format(2, 48000.0F, false, 3);
     Buffer input(frames * 2), intermediate(frames * 2), output(frames * 2);
-    Instance pre(module, pre_mix_clsid), post(module, post_mix_clsid);
+    Instance pre(module, test_pre_clsid), post(module, test_post_clsid);
     auto a = descriptor(media.Get(), input.data(), frames);
     auto b = descriptor(media.Get(), intermediate.data(), frames);
     auto c = descriptor(media.Get(), output.data(), frames);
@@ -537,14 +546,14 @@ void test_chain(const Module& module) {
             const double sample = input.data()[index];
             const double actual = output.data()[index];
             expect_near(intermediate.data()[index], sample, "pre-mix unity");
-            expect_near(output.data()[index], sample * std::pow(10.0, -6.0 / 20.0), "chain gain once");
+            expect_near(output.data()[index], sample * default_gain(), "chain gain once");
             input_energy[channel] += sample * sample;
             output_energy[channel] += actual * actual;
         }
     }
     for (UINT32 channel = 0; channel < 2; ++channel) {
         const double db = 10.0 * std::log10(output_energy[channel] / input_energy[channel]);
-        require(std::abs(db + 6.0) < 1.0e-5, "measured chain attenuation is -6 dB");
+        require(std::abs(db - default_db) < 1.0e-5, "measured chain gain matches registration family");
         std::cout << "  Channel " << channel << " measured gain: " << std::fixed
                   << std::setprecision(6) << db << " dB\n";
     }
@@ -575,9 +584,9 @@ void test_live_profile(const std::filesystem::path& path) {
         {"Right", ChannelSelection::selected(2), {{FilterType::peak,1499,-3,2}}}, {"All",{}, {},-2}}};
     for (const float rate : {48000.0F, 96000.0F}) {
         save_profile_file(profile_path,{filters,48000,2});
-        Instance instance(module,post_mix_clsid,false);
+        Instance instance(module,test_post_clsid,false);
         APOInitSystemEffects init{};
-        init.APOInit = {sizeof(init),post_mix_clsid};
+        init.APOInit = {sizeof(init),test_post_clsid};
         hr(instance.apo->Initialize(sizeof(init),reinterpret_cast<BYTE*>(&init)),S_OK,"profile initialize");
         auto media = format(2,rate);
         constexpr UINT32 frames = 64;
@@ -585,6 +594,24 @@ void test_live_profile(const std::filesystem::path& path) {
         auto in = descriptor(media.Get(),input.data(),frames), out = descriptor(media.Get(),output.data(),frames);
         instance.lock(in,out);
         auto source = property(input.data(),frames,BUFFER_VALID), target = property(output.data(),0,BUFFER_INVALID);
+        if (test_component) {
+            // An unprovisioned component must remain neutral, even when an old
+            // package profile exists beside the DLL or changes while locked.
+            std::fill_n(input.data(), frames * 2, 0.1F);
+            for (const auto gain : {-31.0, -12.0}) {
+                save_profile_file(profile_path, {Configuration{{{"Old lab EQ", {}, {}, gain}}}, rate, 2});
+                Sleep(250);
+                instance.process(source, target);
+                for (UINT32 i = 0; i < frames * 2; ++i) {
+                    expect_near(output.data()[i], 0.1, "component ignored legacy package profile");
+                }
+            }
+            instance.unlock(); instance.lock(in, out);
+            instance.process(source, target);
+            expect_near(output.data()[0], 0.1, "component remains neutral after relock");
+            instance.unlock(); input.guards(); output.guards();
+            continue;
+        }
         ParametricEq reference; reference.configure(filters,rate,2);
         std::array<float,frames*2> expected{};
         for (unsigned block=0; block<10; ++block) {
@@ -674,8 +701,8 @@ void test_control_bridge(const std::filesystem::path& path) {
         EditSession seed(saved); save_profile_settings(seed,*persisted.Get());
         const auto endpoint=Microsoft::WRL::Make<control_test::Endpoint>(store.Get(),persisted.Get());
         const auto devices=Microsoft::WRL::Make<control_test::Devices>(endpoint.Get());
-        Instance instance(module,post_mix_clsid,false);
-        APOInitSystemEffects init{}; init.APOInit={sizeof(init),post_mix_clsid}; init.pDeviceCollection=devices.Get();
+        Instance instance(module,test_post_clsid,false);
+        APOInitSystemEffects init{}; init.APOInit={sizeof(init),test_post_clsid}; init.pDeviceCollection=devices.Get();
         hr(instance.apo->Initialize(sizeof(init),reinterpret_cast<BYTE*>(&init)),S_OK,"initialize settings bridge");
         constexpr UINT32 frames=128;
         auto media=format(2,rate); Buffer input(frames*2),output(frames*2); input.fill(0.1F);
@@ -802,8 +829,8 @@ void test_device_recovery(const Module& module) {
         const auto devices=Microsoft::WRL::Make<control_test::Devices>(endpoint.Get());
         enumerator->endpoint(endpoint.Get()); enumerator->lookup_result=S_OK;
         enumerator->callback->OnDeviceAdded(id);
-        Instance instance(module,post_mix_clsid,false);
-        APOInitSystemEffects init{}; init.APOInit={sizeof(init),post_mix_clsid}; init.pDeviceCollection=devices.Get();
+        Instance instance(module,test_post_clsid,false);
+        APOInitSystemEffects init{}; init.APOInit={sizeof(init),test_post_clsid}; init.pDeviceCollection=devices.Get();
         hr(instance.apo->Initialize(sizeof(init),reinterpret_cast<BYTE*>(&init)),S_OK,"initialize returning endpoint APO");
         constexpr UINT32 frames=128;
         auto media=format(layout.channels,layout.rate); Buffer input(frames*layout.channels),output(frames*layout.channels); input.fill(0.1F);
@@ -834,7 +861,11 @@ void test_device_recovery(const Module& module) {
     }
 }
 
-int run(const std::filesystem::path& path) {
+int run(const std::filesystem::path& path, bool component) {
+    test_component = component;
+    test_pre_clsid = component ? component_pre_mix_clsid : pre_mix_clsid;
+    test_post_clsid = component ? component_post_mix_clsid : post_mix_clsid;
+    default_db = component ? 0.0 : -6.0;
     const ComRuntime com;
     const Module module(path);
     std::cout << "Contour standalone APO host -- no device attachment or playback\n";
@@ -844,13 +875,14 @@ int run(const std::filesystem::path& path) {
     suite.run("initialization, latency, and frame mapping", [&] { test_initialization(module); });
     suite.run("float formats, PCM suggestions, and mismatched formats", [&] { test_negotiation(module); });
     suite.run("lock validation, reset, unlock, and format changes", [&] { test_lifecycle(module); });
-    suite.run("pre-mix pass-through, separate buffers", [&] { test_processing(module, pre_mix_clsid, false); });
-    suite.run("pre-mix pass-through, in-place", [&] { test_processing(module, pre_mix_clsid, true); });
-    suite.run("post-mix gain, separate buffers", [&] { test_processing(module, post_mix_clsid, false); });
-    suite.run("post-mix gain, in-place", [&] { test_processing(module, post_mix_clsid, true); });
+    suite.run("pre-mix pass-through, separate buffers", [&] { test_processing(module, test_pre_clsid, false); });
+    suite.run("pre-mix pass-through, in-place", [&] { test_processing(module, test_pre_clsid, true); });
+    suite.run("post-mix gain, separate buffers", [&] { test_processing(module, test_post_clsid, false); });
+    suite.run("post-mix gain, in-place", [&] { test_processing(module, test_post_clsid, true); });
     suite.run("silence, invalid buffers, bounds, and channel isolation", [&] { test_flags(module); });
-    suite.run("pre/post chain applies -6 dB exactly once", [&] { test_chain(module); });
-    suite.run("saved PEQ, actual stream rates, tails, live edits, rejection and bypass", [&] { test_live_profile(path); });
+    suite.run("pre/post chain applies the expected gain once", [&] { test_chain(module); });
+    suite.run(component ? "device-scoped identity ignores package-wide lab profiles" :
+        "saved PEQ, actual stream rates, tails, live edits, rejection and bypass", [&] { test_live_profile(path); });
     suite.run("editor to actual APO through Windows properties, acknowledgement, rejection, save/revert, and restart", [&] { test_control_bridge(path); });
     suite.run("device controller across actual APO recreation, rate/channel changes, preserved drafts, and explicit preview", [&] { test_device_recovery(module); });
     suite.run("DLL unloads after all test instances", [&] { hr(module.can_unload(), S_OK, "final lifetime"); });
@@ -860,17 +892,17 @@ int run(const std::filesystem::path& path) {
 
 int wmain(int argc, wchar_t* argv[]) {
     if (argc == 2 && std::wstring_view(argv[1]) == L"--help") {
-        std::cout << "Usage: contour-apo-host <path-to-contour-apo.dll>\n"
+        std::cout << "Usage: contour-apo-host <path-to-contour-apo.dll> [--component]\n"
                      "Load the DLL directly and validate its COM/APO contracts and sample output.\n"
                      "Does not register effects, attach to devices, or play audio.\n";
         return 0;
     }
-    if (argc != 2) {
+    if (argc != 2 && !(argc == 3 && std::wstring_view(argv[2]) == L"--component")) {
         std::cerr << "Expected a DLL path. Use contour-apo-host --help.\n";
         return 2;
     }
     try {
-        return run(argv[1]);
+        return run(argv[1], argc == 3);
     } catch (const std::exception& error) {
         std::cerr << "Contour APO host: " << error.what() << '\n';
         return 1;

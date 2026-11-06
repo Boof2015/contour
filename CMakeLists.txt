@@ -80,11 +80,21 @@ if(MSVC)
     target_link_options(contour-apo PRIVATE /MANIFEST:NO)
 endif()
 
-add_executable(contour-deploy-info tools/deployment/info.cpp)
+add_executable(contour-deploy-info tools/deployment/info.cpp tools/deployment/device_inventory.cpp)
 contour_target(contour-deploy-info)
 target_include_directories(contour-deploy-info PRIVATE include)
 target_link_libraries(contour-deploy-info PRIVATE AudioBaseProcessingObjectV140
-    audioeng ole32 uuid advapi32)
+    audioeng ole32 uuid advapi32 cfgmgr32)
+
+# Explicit offline staging target. This is not the desktop install action and
+# does not install a driver, register a COM object, or restart Windows Audio.
+add_custom_target(contour-component-package
+    COMMAND powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools/deployment/stage-component.ps1"
+        -BinaryDirectory $<TARGET_FILE_DIR:contour-apo>
+        -OutputDirectory "${CMAKE_BINARY_DIR}/component-package/$<CONFIG>"
+    DEPENDS contour-apo contour-deploy-info
+    VERBATIM)
 
 add_executable(contour-audio-test tools/audio_test/main.cpp)
 contour_target(contour-audio-test)
@@ -102,7 +112,34 @@ target_link_libraries(contour-audio-test PRIVATE ole32 uuid avrt contour-profile
     add_dependencies(contour-apo-host contour-apo)
 include(CTest)
 if(BUILD_TESTING)
+    set(CONTOUR_INFVERIF "" CACHE FILEPATH "Optional WDK InfVerif.exe for component package checks")
+    set(CONTOUR_INF2CAT "" CACHE FILEPATH "Optional WDK Inf2Cat.exe for component package checks")
+    set(component_validation_tools)
+    if(CONTOUR_INFVERIF)
+        list(APPEND component_validation_tools -InfVerif "${CONTOUR_INFVERIF}")
+    endif()
+    if(CONTOUR_INF2CAT)
+        list(APPEND component_validation_tools -Inf2Cat "${CONTOUR_INF2CAT}")
+    endif()
     add_test(NAME apo-contract COMMAND contour-apo-host $<TARGET_FILE:contour-apo>)
+    add_test(NAME apo-component-contract COMMAND contour-apo-host $<TARGET_FILE:contour-apo> --component)
+    add_test(NAME component-package COMMAND powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/component_package_tests.ps1"
+        -BinaryDirectory $<TARGET_FILE_DIR:contour-apo>
+        -WorkDirectory "${CMAKE_BINARY_DIR}/component-package-tests"
+        ${component_validation_tools})
+    set_tests_properties(component-package PROPERTIES TIMEOUT 90)
+    add_test(NAME extension-package COMMAND powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/extension_package_tests.ps1"
+        -BinaryDirectory $<TARGET_FILE_DIR:contour-apo>
+        -WorkDirectory "${CMAKE_BINARY_DIR}/extension-package-tests"
+        ${component_validation_tools})
+    set_tests_properties(extension-package PROPERTIES TIMEOUT 90)
+    add_test(NAME endpoint-deployment COMMAND powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/endpoint_deployment_tests.ps1"
+        -BinaryDirectory $<TARGET_FILE_DIR:contour-apo>
+        -WorkDirectory "${CMAKE_BINARY_DIR}/endpoint-deployment-tests")
+    set_tests_properties(endpoint-deployment PROPERTIES TIMEOUT 180)
 
     add_executable(contour-dsp-tests tests/dsp_tests.cpp)
     contour_target(contour-dsp-tests)

@@ -21,6 +21,12 @@ const APO_REG_PROPERTIES pre_properties = {pre_mix_clsid, flags,
 const APO_REG_PROPERTIES post_properties = {post_mix_clsid, flags,
     L"Contour post-mix EQ", L"Contour contributors", 0, 2,
     1, 1, 1, 1, ULONG_MAX, 1, {__uuidof(IAudioSystemEffects)}};
+const APO_REG_PROPERTIES component_pre_properties = {component_pre_mix_clsid, flags,
+    L"Contour pre-mix pass-through", L"Contour contributors", 0, 1,
+    1, 1, 1, 1, ULONG_MAX, 1, {__uuidof(IAudioSystemEffects)}};
+const APO_REG_PROPERTIES component_post_properties = {component_post_mix_clsid, flags,
+    L"Contour post-mix EQ", L"Contour contributors", 0, 2,
+    1, 1, 1, 1, ULONG_MAX, 1, {__uuidof(IAudioSystemEffects)}};
 constexpr GUID float_format = {STATIC_KSDATAFORMAT_SUBTYPE_IEEE_FLOAT};
 // pow(10, -6 / 20), rounded once to float. No dB conversion in APOProcess.
 constexpr float minus_six_db = 0.5011872336272722F;
@@ -90,10 +96,13 @@ HRESULT negotiate(IAudioMediaType* opposite, IAudioMediaType* requested,
 }
 } // namespace
 
-GainApo::GainApo(bool post_mix, IUnknown* outer)
-    : CBaseAudioProcessingObject(post_mix ? &post_properties : &pre_properties),
+GainApo::GainApo(bool post_mix, IUnknown* outer, bool component_registration)
+    : CBaseAudioProcessingObject(component_registration
+          ? (post_mix ? &component_post_properties : &component_pre_properties)
+          : (post_mix ? &post_properties : &pre_properties)),
       controlling_unknown_(outer != nullptr ? outer : &inner_),
-      gain_(post_mix ? minus_six_db : 1.0F), post_mix_(post_mix) {
+      gain_(post_mix && !component_registration ? minus_six_db : 1.0F), post_mix_(post_mix),
+      component_registration_(component_registration) {
     InterlockedIncrement(&module_references);
 }
 
@@ -296,7 +305,9 @@ void GainApo::prepare_runtime() {
     profile_revision_ = 0; seen_profile_.clear(); last_profile_error_.clear();
     // The settings path starts neutral when empty/unreadable/invalid. The
     // original file-based lab path retains its established -6 dB default.
-    const bool settings_mode=control_cookie_ || saved_cookie_;
+    // Component packages are shared, immutable Driver Store files. Settings
+    // must come from this endpoint; never fall back to a package-wide lab EQ.
+    const bool settings_mode=component_registration_ || control_cookie_ || saved_cookie_;
     eq::Layer fallback; fallback.gain_db = -6;
     const auto initial_configuration=settings_mode ? eq::Configuration{} : eq::Configuration{{fallback}};
     auto* initial = eq::ResidentBank::prepare(initial_configuration, sample_rate_, channels_, 0);

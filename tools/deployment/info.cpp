@@ -8,6 +8,7 @@
 #include <propvarutil.h>
 #include <wrl/client.h>
 #include <contour/apo_ids.h>
+#include "device_inventory.h"
 
 #include <bit>
 #include <filesystem>
@@ -81,6 +82,38 @@ struct Library {
     ~Library() { FreeLibrary(value); }
 };
 
+void emit_inventory(const wchar_t* endpoint) {
+    const Com com;
+    const auto report = contour::deployment::inspect_device_inventory(endpoint);
+    const auto list = [](const std::vector<std::wstring>& values) {
+        std::cout << '[';
+        bool first = true;
+        for (const auto& value : values) {
+            if (!first) { std::cout << ','; }
+            first = false; std::cout << json(value);
+        }
+        std::cout << ']';
+    };
+    std::cout << "{\"Schema\":1,\"Kind\":\"ContourAdapterInventory\",\"EndpointId\":" << json(report.endpoint_id)
+        << ",\"TopologyDeviceId\":" << json(report.topology_device_id) << ",\"AdapterId\":" << json(report.adapter_id)
+        << ",\"SearchIds\":";
+    list(report.search_ids);
+    std::cout << ",\"Matches\":[";
+    bool first = true;
+    for (const auto& device : report.matches) {
+        if (!first) { std::cout << ','; }
+        first = false;
+        std::cout << "{\"InstanceId\":" << json(device.id) << ",\"Name\":" << json(device.name)
+            << ",\"ClassId\":" << json(device.class_id) << ",\"Present\":" << (device.present ? "true" : "false")
+            << ",\"DriverInf\":" << json(device.driver_inf) << ",\"DriverVersion\":" << json(device.driver_version)
+            << ",\"Provider\":" << json(device.provider) << ",\"Service\":" << json(device.service)
+            << ",\"HardwareIds\":";
+        list(device.hardware_ids); std::cout << ",\"CompatibleIds\":"; list(device.compatible_ids);
+        std::cout << ",\"Children\":"; list(device.children); std::cout << '}';
+    }
+    std::cout << "]}\n";
+}
+
 class RegistryCapture {
 public:
     RegistryCapture() {
@@ -126,7 +159,8 @@ private:
 };
 
 void emit_endpoint(const wchar_t* id) {
-    if (std::wstring_view(id) == L"--registration-only") {
+    if (std::wstring_view(id) == L"--registration-only" ||
+        std::wstring_view(id) == L"--component-registration-only") {
         std::cout << "null";
         return;
     }
@@ -183,13 +217,144 @@ void emit_values(HKEY root, const std::wstring& path) {
     std::cout << ']';
 }
 
-void run(const wchar_t* dll, const wchar_t* endpoint) {
-    const Com com;
-    const Library library(std::filesystem::absolute(dll));
+using Registration = std::unique_ptr<APO_REG_PROPERTIES, decltype(&CoTaskMemFree)>;
+
+Registration read_registration(const Library& library, REFCLSID clsid) {
     using FactoryFunction = HRESULT (STDAPICALLTYPE*)(REFCLSID, REFIID, void**);
     const auto symbol = GetProcAddress(library.value, "DllGetClassObject");
     if (!symbol) { throw std::runtime_error("DLL does not expose DllGetClassObject"); }
     const auto get_factory = std::bit_cast<FactoryFunction>(symbol);
+    ComPtr<IClassFactory> factory;
+    check(get_factory(clsid, IID_PPV_ARGS(&factory)), "get Contour factory");
+    ComPtr<IAudioProcessingObject> apo;
+    check(factory->CreateInstance(nullptr, IID_PPV_ARGS(&apo)), "create Contour APO");
+    APO_REG_PROPERTIES* raw = nullptr;
+    check(apo->GetRegistrationProperties(&raw), "read APO properties");
+    Registration properties(raw, CoTaskMemFree);
+    if (!properties || properties->clsid != clsid) { throw std::runtime_error("APO identity mismatch"); }
+    return properties;
+}
+
+// INF string literals: metadata is currently ASCII. Reject unsupported text
+// rather than silently corrupting it through the process console code page.
+std::string inf_string(std::wstring_view value) {
+    std::string result = "\"";
+    for (const auto ch : value) {
+        if (ch < 32 || ch > 126) { throw std::runtime_error("Non-ASCII INF metadata"); }
+        if (ch == L'\"' || ch == L'%') { result += static_cast<char>(ch); }
+        result += static_cast<char>(ch);
+    }
+    return result + '"';
+}
+
+void emit_component_inf(const wchar_t* dll) {
+#if !defined(_M_X64)
+    throw std::runtime_error("The component package currently targets Windows 11 x64 only");
+#endif
+    const Com com;
+    const Library library(std::filesystem::absolute(dll));
+    if (FindResourceW(library.value, MAKEINTRESOURCEW(2), RT_MANIFEST)) {
+        throw std::runtime_error("The APO must not contain an embedded manifest");
+    }
+    // Read both identities before emitting anything; an older DLL cannot be
+    // accidentally packaged with new CLSIDs it does not implement.
+    const auto pre = read_registration(library, component_pre_mix_clsid);
+    const auto post = read_registration(library, component_post_mix_clsid);
+    std::ostringstream inf;
+    inf << R"(; Contour device-scoped APO component. Generated from the built DLL.
+; Unsigned staging artifact. An adapter-specific extension must create this
+; component as a child of the audio adapter. This INF does not attach effects.
+[Version]
+Signature="$WINDOWS NT$"
+Class=AudioProcessingObject
+ClassGuid={5989fce8-9cd0-467d-8a6a-5419e31529d4}
+Provider=%Provider%
+DriverVer=11/06/2026,0.1.0.0
+CatalogFile=contour-apo.cat
+PnpLockDown=1
+
+[Manufacturer]
+%Provider%=Contour,NTamd64.10.0...22000
+
+[Contour.NTamd64.10.0...22000]
+%Description%=Contour_Install,SWC\)";
+    // The identifier contains only ASCII and no INF metacharacters.
+    for (const auto ch : std::wstring_view(component_id)) { inf << static_cast<char>(ch); }
+    inf << R"(
+
+[Contour_Install.NT]
+CopyFiles=Contour_Files
+AddReg=Contour_Registration
+
+[Contour_Install.NT.HW]
+AddReg=Contour_Name
+
+[Contour_Name]
+HKR,,FriendlyName,,%Description%
+
+[Contour_Install.NT.Services]
+AddService=,2
+
+[Contour_Files]
+contour-apo.dll
+
+[SourceDisksNames]
+1=%Disk%
+
+[SourceDisksFiles]
+contour-apo.dll=1
+
+[DestinationDirs]
+Contour_Files=13
+
+[SignatureAttributes]
+contour-apo.dll=SignatureAttributes.PETrust
+
+[SignatureAttributes.PETrust]
+PETrust=true
+
+[Contour_Registration]
+)";
+    for (const auto* p : {pre.get(), post.get()}) {
+        const auto id = guid(p->clsid);
+        const auto cls = inf_string(L"Classes\\CLSID\\" + id);
+        const auto server = inf_string(L"Classes\\CLSID\\" + id + L"\\InprocServer32");
+        inf << "HKR," << cls << ",,," << inf_string(p->szFriendlyName) << '\n'
+            << "HKR," << server << ",,0x00020000,\"%13%\\contour-apo.dll\"\n"
+            << "HKR," << server << ",ThreadingModel,,\"Both\"\n";
+        const auto key = "HKR," + inf_string(L"AudioEngine\\AudioProcessingObjects\\" + id) + ',';
+        const auto number = [&](const char* name, UINT32 value) {
+            // INF's decimal parser rejects UINT_MAX; hex preserves all DWORD
+            // values, including the SDK's unlimited MaxInstances sentinel.
+            inf << key << name << ",0x00010001,0x" << std::hex << value << std::dec << '\n';
+        };
+        inf << key << "FriendlyName,," << inf_string(p->szFriendlyName) << '\n'
+            << key << "Copyright,," << inf_string(p->szCopyrightInfo) << '\n';
+        number("MajorVersion", p->u32MajorVersion);
+        number("MinorVersion", p->u32MinorVersion);
+        number("Flags", p->Flags);
+        number("MinInputConnections", p->u32MinInputConnections);
+        number("MaxInputConnections", p->u32MaxInputConnections);
+        number("MinOutputConnections", p->u32MinOutputConnections);
+        number("MaxOutputConnections", p->u32MaxOutputConnections);
+        number("MaxInstances", p->u32MaxInstances);
+        number("NumAPOInterfaces", p->u32NumAPOInterfaces);
+        for (UINT32 index = 0; index < p->u32NumAPOInterfaces; ++index) {
+            inf << key << "APOInterface" << index << ",," << inf_string(guid(p->iidAPOInterfaceList[index])) << '\n';
+        }
+    }
+    inf << R"(
+[Strings]
+Provider="Contour"
+Description="Contour Audio Processing"
+Disk="Contour APO package"
+)";
+    std::cout << inf.str();
+}
+
+void run(const wchar_t* dll, const wchar_t* endpoint) {
+    const Com com;
+    const Library library(std::filesystem::absolute(dll));
     std::cout << "{\"Schema\":1,\"EmbeddedManifest\":"
         << (FindResourceW(library.value, MAKEINTRESOURCEW(2), RT_MANIFEST) ? "true" : "false")
         << ",\"Endpoint\":";
@@ -198,15 +363,10 @@ void run(const wchar_t* dll, const wchar_t* endpoint) {
     // Endpoint lookup precedes registry redirection; mapping is process-local.
     const RegistryCapture capture;
     bool first = true;
-    for (const auto& clsid : {pre_mix_clsid, post_mix_clsid}) {
-        ComPtr<IClassFactory> factory;
-        check(get_factory(clsid, IID_PPV_ARGS(&factory)), "get Contour factory");
-        ComPtr<IAudioProcessingObject> apo;
-        check(factory->CreateInstance(nullptr, IID_PPV_ARGS(&apo)), "create Contour APO");
-        APO_REG_PROPERTIES* raw = nullptr;
-        check(apo->GetRegistrationProperties(&raw), "read APO properties");
-        const std::unique_ptr<APO_REG_PROPERTIES, decltype(&CoTaskMemFree)> properties(raw, CoTaskMemFree);
-        if (properties->clsid != clsid) { throw std::runtime_error("APO identity mismatch"); }
+    const bool component = std::wstring_view(endpoint) == L"--component-registration-only";
+    for (const auto& clsid : {component ? component_pre_mix_clsid : pre_mix_clsid,
+                              component ? component_post_mix_clsid : post_mix_clsid}) {
+        const auto properties = read_registration(library, clsid);
         check(RegisterAPO(properties.get()), "capture RegisterAPO");
         if (!first) { std::cout << ','; }
         first = false;
@@ -222,11 +382,14 @@ void run(const wchar_t* dll, const wchar_t* endpoint) {
 
 int wmain(int argc, wchar_t* argv[]) {
     if (argc != 3) {
-        std::cerr << "Usage: contour-deploy-info <APO DLL> <playback endpoint ID | --registration-only>\n";
+        std::cerr << "Usage: contour-deploy-info <APO DLL> <playback endpoint ID | --registration-only | --component-registration-only | --component-inf>\n";
+        std::cerr << "       contour-deploy-info --device-inventory <playback endpoint ID>\n";
         return 2;
     }
     try {
-        run(argv[1], argv[2]);
+        if (std::wstring_view(argv[1]) == L"--device-inventory") { emit_inventory(argv[2]); }
+        else if (std::wstring_view(argv[2]) == L"--component-inf") { emit_component_inf(argv[1]); }
+        else { run(argv[1], argv[2]); }
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "Deployment inspection: " << error.what() << '\n';

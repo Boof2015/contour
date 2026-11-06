@@ -19,7 +19,7 @@ extern HINSTANCE module_instance;
 #pragma AVRT_VTABLES_BEGIN
 class GainApo final : public CBaseAudioProcessingObject, public IAudioSystemEffects {
 public:
-    explicit GainApo(bool post_mix, IUnknown* outer);
+    explicit GainApo(bool post_mix, IUnknown* outer, bool component_registration);
     ~GainApo() override;
 
     // Windows provides resident storage for the object and inline DSP state.
@@ -74,6 +74,7 @@ private:
     volatile LONG references_ = 1;
     const float gain_;
     const bool post_mix_;
+    const bool component_registration_;
     bool system_effect_ = false;
     dsp::ChannelGain processor_;
     eq::SmoothEq live_eq_;

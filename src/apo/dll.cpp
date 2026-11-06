@@ -13,7 +13,8 @@ HINSTANCE module_instance = nullptr;
 namespace {
 class ClassFactory final : public IClassFactory {
 public:
-    explicit ClassFactory(bool post_mix) : post_mix_(post_mix) {
+    explicit ClassFactory(bool post_mix, bool component_registration)
+        : post_mix_(post_mix), component_registration_(component_registration) {
         InterlockedIncrement(&module_references);
     }
     ~ClassFactory() { InterlockedDecrement(&module_references); }
@@ -48,7 +49,7 @@ public:
         if (outer != nullptr && iid != __uuidof(IUnknown)) {
             return E_NOINTERFACE;
         }
-        auto* instance = new GainApo(post_mix_, outer);
+        auto* instance = new GainApo(post_mix_, outer, component_registration_);
         if (instance == nullptr) {
             TraceLoggingWrite(diagnostic_provider, "CreateInstance",
                 TraceLoggingBool(post_mix_, "PostMix"), TraceLoggingGuid(iid, "InterfaceId"),
@@ -74,6 +75,7 @@ public:
 private:
     volatile LONG references_ = 1;
     const bool post_mix_;
+    const bool component_registration_;
 };
 } // namespace
 } // namespace contour::apo
@@ -95,10 +97,12 @@ extern "C" HRESULT __stdcall DllGetClassObject(REFCLSID clsid, REFIID iid, void*
     }
     *result = nullptr;
     using namespace contour::apo;
-    if (clsid != pre_mix_clsid && clsid != post_mix_clsid) {
+    const bool component = clsid == component_pre_mix_clsid || clsid == component_post_mix_clsid;
+    if (!component && clsid != pre_mix_clsid && clsid != post_mix_clsid) {
         return CLASS_E_CLASSNOTAVAILABLE;
     }
-    auto* factory = new (std::nothrow) ClassFactory(clsid == post_mix_clsid);
+    auto* factory = new (std::nothrow) ClassFactory(
+        clsid == post_mix_clsid || clsid == component_post_mix_clsid, component);
     if (factory == nullptr) {
         return E_OUTOFMEMORY;
     }
