@@ -5,6 +5,7 @@
 #include <shellapi.h>
 #include <dwmapi.h>
 #include <windowsx.h>
+#include <cstdlib>
 #include <filesystem>
 #include <memory>
 
@@ -13,6 +14,7 @@ using Microsoft::WRL::ComPtr;
 using Microsoft::WRL::Callback;
 using contour::app::Json;
 constexpr auto page=L"https://contour.invalid/index.html";
+constexpr UINT start_frame_drag=WM_APP+1,open_system_menu=WM_APP+2;
 struct App {
     HWND window=nullptr;
     std::unique_ptr<contour::app::Model> model;
@@ -21,6 +23,7 @@ struct App {
     std::filesystem::path assets,data;
     bool ready=false,custom_frame=false;
     RECT view_bounds{-1,-1,-1,-1};
+    ULONGLONG caption_click=0; POINT caption_point{};
     Json sent_window_state;
     COLORREF background_color=RGB(22,22,24);
     void apply_background() {
@@ -75,9 +78,26 @@ struct App {
                     // starts Windows' normal resize loop without painting a bar.
                     if (custom_frame && !IsZoomed(window)) {
                         const auto hit=action=="resize-top-left" ? HTTOPLEFT : action=="resize-top-right" ? HTTOPRIGHT : HTTOP;
-                        POINT cursor{}; GetCursorPos(&cursor); ReleaseCapture();
-                        PostMessageW(window,WM_NCLBUTTONDOWN,hit,MAKELPARAM(cursor.x,cursor.y));
+                        POINT cursor{}; GetCursorPos(&cursor);
+                        PostMessageW(window,start_frame_drag,hit,MAKELPARAM(cursor.x,cursor.y));
                     }
+                }
+                else if (action=="move" && custom_frame) {
+                    // Synthesized caption presses never produce WM_NCLBUTTONDBLCLK,
+                    // so a second press within the system double-click limits toggles
+                    // maximize the way a native caption does.
+                    POINT cursor{}; GetCursorPos(&cursor); const auto now=GetTickCount64();
+                    const bool second=now-caption_click<=GetDoubleClickTime() &&
+                        std::abs(cursor.x-caption_point.x)*2<=GetSystemMetrics(SM_CXDOUBLECLK) &&
+                        std::abs(cursor.y-caption_point.y)*2<=GetSystemMetrics(SM_CYDOUBLECLK);
+                    caption_click=second ? 0 : now; caption_point=cursor;
+                    if (second) { ShowWindow(window,IsZoomed(window) ? SW_RESTORE : SW_MAXIMIZE); }
+                    else { PostMessageW(window,start_frame_drag,HTCAPTION,MAKELPARAM(cursor.x,cursor.y)); }
+                }
+                else if (action=="menu" && custom_frame) {
+                    // TrackPopupMenu runs a modal loop; keep it out of this WebView event.
+                    POINT cursor{}; GetCursorPos(&cursor);
+                    PostMessageW(window,open_system_menu,0,MAKELPARAM(cursor.x,cursor.y));
                 }
                 else { throw std::invalid_argument("Unknown window action"); }
                 send({{"id",id},{"ok",true},{"data",window_state()}}); return;
@@ -104,12 +124,13 @@ struct App {
                         settings->put_AreDefaultContextMenusEnabled(FALSE); settings->put_AreDevToolsEnabled(FALSE);
                         settings->put_IsStatusBarEnabled(FALSE); settings->put_AreHostObjectsAllowed(FALSE);
                         settings->put_AreDefaultScriptDialogsEnabled(FALSE); settings->put_IsZoomControlEnabled(FALSE);
-                        ComPtr<ICoreWebView2Settings9> frame_settings;
-                        if (SUCCEEDED(settings.As(&frame_settings)) && SUCCEEDED(frame_settings->put_IsNonClientRegionSupportEnabled(TRUE))) {
-                            custom_frame=true;
-                            SetWindowPos(window,nullptr,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOZORDER|SWP_NOACTIVATE|SWP_FRAMECHANGED);
-                            resize();
-                        }
+                        // The page starts caption drags through "move". WebView2's
+                        // app-region support stays off: it blocked this thread ~20 ms
+                        // whenever the title bar's width changed, so resizing advanced
+                        // in large steps and each async WebView frame visibly jumped.
+                        custom_frame=true;
+                        SetWindowPos(window,nullptr,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOZORDER|SWP_NOACTIVATE|SWP_FRAMECHANGED);
+                        resize();
                         ComPtr<ICoreWebView2_3> local;
                         if (FAILED(view.As(&local)) || FAILED(local->SetVirtualHostNameToFolderMapping(L"contour.invalid",assets.c_str(),COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_DENY))) {
                             fail("Contour requires a newer Microsoft Edge WebView2 Runtime."); return S_OK;
@@ -157,9 +178,9 @@ LRESULT CALLBACK window_proc(HWND window,UINT message,WPARAM w,LPARAM l) {
             DefWindowProcW(window,message,w,l);
             const auto dpi=GetDpiForWindow(window);
             params->rgrc[0].top=top+(IsZoomed(window) ? GetSystemMetricsForDpi(SM_CYFRAME,dpi)+GetSystemMetricsForDpi(SM_CXPADDEDBORDER,dpi) : 0);
-            // Preserve the last frame while WebView presents the new size.
-            // WVR_REDRAW invalidates the entire client on every drag step and
-            // makes the asynchronously rendered child fall further behind.
+            // Keep client bits anchored to the client origin. With WVR_REDRAW a
+            // top-edge drag showed the WebView at its old screen position for a
+            // frame, so the whole UI jumped by the drag distance and snapped back.
             return 0;
         }
         break;
@@ -176,6 +197,23 @@ LRESULT CALLBACK window_proc(HWND window,UINT message,WPARAM w,LPARAM l) {
             }
         }
         break;
+    case start_frame_drag:
+        // A quick click can be released before this posted message runs. A move
+        // or size loop started then would leave the window following the pointer.
+        if (GetAsyncKeyState(GetSystemMetrics(SM_SWAPBUTTON) ? VK_RBUTTON : VK_LBUTTON)<0) {
+            ReleaseCapture(); DefWindowProcW(window,WM_NCLBUTTONDOWN,w,l);
+        }
+        return 0;
+    case open_system_menu: {
+        const auto menu=GetSystemMenu(window,FALSE); const bool zoomed=IsZoomed(window)!=FALSE;
+        EnableMenuItem(menu,SC_RESTORE,MF_BYCOMMAND|(zoomed ? MF_ENABLED : MF_GRAYED));
+        EnableMenuItem(menu,SC_MOVE,MF_BYCOMMAND|(zoomed ? MF_GRAYED : MF_ENABLED));
+        EnableMenuItem(menu,SC_SIZE,MF_BYCOMMAND|(zoomed ? MF_GRAYED : MF_ENABLED));
+        EnableMenuItem(menu,SC_MAXIMIZE,MF_BYCOMMAND|(zoomed ? MF_GRAYED : MF_ENABLED));
+        const auto command=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_RIGHTBUTTON,GET_X_LPARAM(l),GET_Y_LPARAM(l),0,window,nullptr);
+        if (command) { PostMessageW(window,WM_SYSCOMMAND,static_cast<WPARAM>(command),0); }
+        return 0;
+    }
     case WM_SIZE: app->resize(); if (app->ready) { app->send_window_state(); } return 0;
     case WM_MOVE: if (app->controller) { app->controller->NotifyParentWindowPositionChanged(); } break;
     case WM_GETMINMAXINFO: {

@@ -427,14 +427,13 @@ ul { margin: 0; padding: 0; list-style: none; }
 .layer-actions [data-layer-action="trash"]:hover { color:var(--red); }
 @media (hover:none) { .layer-actions { opacity:1; pointer-events:auto; } }
 .caption { display:none; }
-:root[data-custom-frame="true"] .tb { app-region:drag; padding-right:0; }
-:root[data-custom-frame="true"] .tb button,:root[data-custom-frame="true"] .tb input { app-region:no-drag; }
+:root[data-custom-frame="true"] .tb { padding-right:0; }
 :root[data-custom-frame="true"] .caption { display:flex; }
 .caption button { width:46px; display:grid; place-items:center; color:var(--text-2); }
 .caption button:hover { background:var(--ctl); color:var(--text); }
 .caption button[data-window="close"]:hover { background:#c42b1c; color:white; }
 .caption svg { fill:none; stroke:currentColor; stroke-width:1; }
-.resize-top { display:none; position:absolute; inset:0 0 auto; height:5px; z-index:100; app-region:no-drag; cursor:ns-resize; }
+.resize-top { display:none; position:absolute; inset:0 0 auto; height:5px; z-index:100; cursor:ns-resize; }
 :root[data-custom-frame="true"]:not([data-maximized="true"]) .resize-top { display:block; }
 .resize-top i { position:absolute; top:0; bottom:0; width:8px; }
 .resize-top i:first-child { left:0; cursor:nwse-resize; }

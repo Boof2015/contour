@@ -212,12 +212,19 @@ function layerAction(i,action){
   });
 }
 
+// The host starts native move/size loops; the title bar's controls stay clickable.
+const captionSpace=t=>!t.closest('button,input')&&t.closest('.tb');
 document.addEventListener('pointerdown',e=>{
-  const edge=e.target.closest('[data-resize]');
-  if(!edge||e.button!==0||!WINDOW.custom||WINDOW.maximized)return;
+  if(e.button!==0||!WINDOW.custom)return;
+  const edge=e.target.closest('[data-resize]'),target=edge?(WINDOW.maximized?null:edge):captionSpace(e.target);
+  if(!target)return;
   e.preventDefault();
-  if(edge.hasPointerCapture(e.pointerId))edge.releasePointerCapture(e.pointerId);
-  rpc('window',{action:edge.dataset.resize}).then(windowState).catch(e=>toast(e.message));
+  if(target.hasPointerCapture(e.pointerId))target.releasePointerCapture(e.pointerId);
+  rpc('window',{action:edge?edge.dataset.resize:'move'}).then(windowState).catch(e=>toast(e.message));
+});
+document.addEventListener('contextmenu',e=>{
+  if(!WINDOW.custom||!captionSpace(e.target))return;
+  e.preventDefault();rpc('window',{action:'menu'}).catch(e=>toast(e.message));
 });
 document.addEventListener('click',async e=>{
   const windowButton=e.target.closest('[data-window]');if(windowButton){rpc('window',{action:windowButton.dataset.window}).then(windowState).catch(e=>toast(e.message));return;}

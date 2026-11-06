@@ -40,6 +40,14 @@ async function main(){
   messageHandler({data:{event:'window',data:{custom:true,maximized:true}}});
   assert.equal(captionWrites,2,'Maximize did not update the window controls');
   context.document.querySelector=()=>null;
+
+  // Empty title-bar space asks the host for a native move and the system menu;
+  // presses on title-bar controls stay with the page.
+  const press=onControl=>({button:0,pointerId:1,preventDefault(){},target:{closest:s=>s==='button,input'?(onControl?{}:null):s==='.tb'?{hasPointerCapture:()=>false}:null}});
+  handlers.pointerdown.forEach(fn=>fn(press(false)));const move=await take('window');assert.equal(move.action,'move');reply(move,{custom:true,maximized:false});
+  handlers.pointerdown.forEach(fn=>fn(press(true)));await turn();assert.equal(posts.length,0,'A title-bar control started a window move');
+  handlers.contextmenu.forEach(fn=>fn(press(false)));const menu=await take('window');assert.equal(menu.action,'menu');reply(menu,{custom:true,maximized:false});
+
   for(let i=0;i<200;i++)evaluate(`grid(${300+i});`);
   assert.ok(evaluate('grids.size')<=8,'Continuous resize retained unbounded frequency grids');
   assert.equal(evaluate("parse('freq','3.2','kHz')"),3200);
