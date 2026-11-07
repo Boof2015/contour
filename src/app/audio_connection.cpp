@@ -82,7 +82,16 @@ ConnectionCheck AudioConnection::check(const std::wstring& id) {
             fill(capacity-padding);
         }
         const auto bytes=read_control_value(*control.Get(),preview_status_key,max_status_bytes);
-        if(bytes){const auto status=decode_status(*bytes);if(status.heartbeat_ms>=started&&status_is_live(status,GetTickCount64()))result.confirmed=true;}
+        if(bytes){
+            const auto status=decode_status(*bytes);
+            if(status.heartbeat_ms>=started&&status_is_live(status,GetTickCount64())){
+                result.confirmed=true;result.engine_path.clear();
+                try {
+                    const auto identity=read_control_value(*control.Get(),engine_identity_key,max_engine_identity_bytes);
+                    if(identity){const auto engine=decode_engine_identity(*identity);if(engine.runtime==status.runtime)result.engine_path=engine.module_path;}
+                } catch (...) {} // Older engines have no build evidence.
+            }
+        }
     }
     if(!result.confirmed&&!stopping_&&!suspended_)result.detail="Contour did not respond on this device. Check that audio enhancements are enabled, or check the installation again.";
     return result;

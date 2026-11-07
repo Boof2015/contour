@@ -14,6 +14,13 @@ template<class F> void rejects(F action) {
 Configuration gain(double db) { return {{{"All",{},{},db}}}; }
 GUID id() { GUID value{}; require(SUCCEEDED(CoCreateGuid(&value)),"Create fixture identity"); return value; }
 void roundtrips() {
+    const EngineIdentity engine{id(),L"C:\\Program Files\\Contour\\runtimes\\test\\contour-apo.dll"};
+    const auto engine_bytes=encode_engine_identity(engine);
+    require(decode_engine_identity(engine_bytes).runtime==engine.runtime&&decode_engine_identity(engine_bytes).module_path==engine.module_path,"Engine identity lost loaded path or runtime");
+    for(std::size_t i=0;i<engine_bytes.size();++i)rejects([&]{decode_engine_identity(std::string_view(engine_bytes).substr(0,i));});
+    rejects([&]{decode_engine_identity(engine_bytes+"x");});
+    rejects([&]{encode_engine_identity({GUID_NULL,engine.module_path});});
+    rejects([&]{encode_engine_identity({engine.runtime,L""});});
     const PreviewRequest request{id(),id(),std::numeric_limits<std::uint64_t>::max(),serialize_profile({gain(-3),48000,2})};
     const auto bytes=encode_request(request);
     const auto decoded=decode_request(bytes);

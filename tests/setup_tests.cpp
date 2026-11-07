@@ -20,8 +20,14 @@ int main() {
         require(setup_action_allowed(report,utf8(endpoint),"Install"),"Reviewed install rejected");
         require(!setup_action_allowed(report,"different endpoint","Install"),"Review carried across output change");
         require(!setup_action_allowed(report,utf8(endpoint),"Remove"),"Unreviewed removal accepted");
+        require(!setup_action_allowed(report,utf8(endpoint),"Update"),"Unreviewed engine update accepted");
+        report["canUpdate"]=true;require(setup_action_allowed(report,utf8(endpoint),"Update"),"Reviewed engine update rejected");
+        require(!setup_action_allowed(report,"another endpoint","Update"),"Engine update review carried across endpoints");
+        report["canRecoverUpdate"]=true;require(setup_action_allowed(report,utf8(endpoint),"RecoverUpdate"),"Reviewed recovery rejected");
+        require(setup_arguments(L"setup.ps1",endpoint,"Update").find(L"-Action Update")!=std::wstring::npos,"Missing fixed update action");
         report["busy"]=true;
         require(!setup_action_allowed(report,utf8(endpoint),"Install"),"Concurrent setup accepted");
+        require(!setup_action_allowed(report,utf8(endpoint),"Update"),"Concurrent engine update accepted");
         std::cout<<"PASS setup boundary: playback identities, fixed actions, quoting, stale review, busy guard\n";
         return 0;
     } catch (const std::exception& e) { std::cerr<<e.what()<<'\n'; return 1; }

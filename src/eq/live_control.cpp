@@ -73,6 +73,23 @@ ProcessingFingerprint processing_fingerprint(const Configuration& configuration,
     return fingerprint;
 }
 
+std::string encode_engine_identity(const EngineIdentity& value) {
+    static_assert(sizeof(wchar_t)==2);
+    check(value.runtime!=GUID_NULL && !value.module_path.empty() && value.module_path.size()<=32767 &&
+          value.module_path.find(L'\0')==value.module_path.npos,"Invalid engine identity");
+    std::string out="CTENG001";guid(out,value.runtime);
+    string(out,{reinterpret_cast<const char*>(value.module_path.data()),value.module_path.size()*sizeof(wchar_t)});
+    return out;
+}
+EngineIdentity decode_engine_identity(std::string_view bytes) {
+    check(bytes.size()<=max_engine_identity_bytes,"Oversized engine identity");Reader in{bytes};
+    check(in.take(8)=="CTENG001","Unsupported engine identity");
+    EngineIdentity value;value.runtime=in.guid();const auto path=in.string(32767*2);in.end();
+    check(path.size()%2==0,"Invalid engine path encoding");value.module_path.resize(path.size()/2);
+    std::memcpy(value.module_path.data(),path.data(),path.size());
+    (void)encode_engine_identity(value);return value;
+}
+
 std::string encode_request(const PreviewRequest& r) {
     valid(r); std::string out="CTREQ001";
     guid(out,r.runtime); guid(out,r.session); number(out,r.revision,8); string(out,r.profile); return out;

@@ -13,6 +13,8 @@ const fixture=()=>{
   state.eqEnabled=true;state.masterIssues=[];state.devices[0].available=true;
   state.devices.push({id:'test-second',name:'Second test device',channels:2,rate:48000,mask:3,available:true},{id:'test-disconnected',name:'Disconnected test device',channels:0,rate:0,mask:0,available:false,state:8});
   const installed=new Set(['test-output']);
+  let engineUpdate=new URL(location.href).searchParams.has('engine-update');
+  if(engineUpdate)window.addEventListener('load',()=>openSettings('outputs'));
   if(new URL(location.href).searchParams.has('uninstalled')){
     installed.delete('test-output');state.editor=null;state.status={endpoint:'unavailable'};
     state.devices[0].name='Speakers (Steam Streaming Speakers)';
@@ -28,8 +30,11 @@ const fixture=()=>{
       if(r.action==='Remove')installed.delete(r.endpoint);
       const attached=installed.has(r.endpoint);
       data={endpoint:r.endpoint,busy:false,state:attached?'attached':'available',installation:attached?'installed':'not_installed',canInstall:!attached,canRemove:attached};
+      if(r.action==='Update')engineUpdate=false;
+      if(engineUpdate)Object.assign(data,{engineState:'update_available',canUpdate:true,engineDevices:['Speakers (Focusrite USB Audio)','Realtek Digital Output (Realtek USB Audio)']});
     }
     if(r.op==='setup'&&r.action==='Remove'&&window.holdRemoval)data={endpoint:r.endpoint,busy:true,state:'removing',canInstall:false,canRemove:false};
+    if(r.op==='setup'&&['Update','RecoverUpdate'].includes(r.action)&&window.holdUpdate)data={endpoint:r.endpoint,busy:true,state:r.action==='Update'?'updating':'recovering',canInstall:false,canRemove:false};
     if(r.op==='setup'&&r.action==='Inspect'&&window.holdInspection)data={endpoint:r.endpoint,busy:true,state:'checking',canInstall:false,canRemove:false};
     if(r.op==='import')data={valid:true,issues:[],layer:{name:'Imported',all:true,mask:0,gain:0,on:true,filters:[filter(-3)]}};
     if(!Number.isSafeInteger(r.requestId))throw Error('Missing numeric bridge request identity');
@@ -156,6 +161,45 @@ const checks=async()=>{
     $('[data-settings-tab="general"]').click();$('[data-theme-choice="light"]').click();assert(document.documentElement.dataset.theme==='light','General appearance preference failed');
     $('[data-act="back-eq"]').click();await wait(60);assert($('#graph')&&APP.eqEnabled===false&&JSON.stringify(P().work)===workBefore,'Returning from Settings lost the editor or master state');
     results.push('Global EQ is independent of profiles; single Install; uninstall review clears on start and progress stays stable through verification');
+
+    await openSettings('outputs');await wait(40);
+    const engineOffer={canUpdate:true,engineState:'update_available',engineDevices:['Offline test output','Second test device']};
+    acceptSetup({endpoint:'test-output',state:'attached',installation:'installed',canRemove:true,...engineOffer});
+    acceptSetup({endpoint:'test-second',state:'available',installation:'not_installed',canInstall:true,...engineOffer});
+    assert($('.engine-update').textContent.includes('all installed devices')&&$('.engine-update').textContent.includes('Second test device'),'Engine update concealed its shared scope');
+    acceptSetup({endpoint:'test-disconnected',state:'blocked',installation:'not_installed',...engineOffer,canUpdate:false});
+    assert($('[data-engine-act="update"]'),'Checking an ineligible device hid the shared update');
+    acceptSetup({endpoint:'test-disconnected',state:'blocked',installation:'not_installed',engineState:'current',canUpdate:false});
+    assert(!$('.engine-update'),'A newer shared engine status left an older device update offer visible');
+    acceptSetup({endpoint:'test-second',state:'available',installation:'not_installed',canInstall:true,...engineOffer});
+    assert(!S.settingsDevice&&!$('.device-detail:not([hidden])')&&$$('.engine-update').length===1&&!$('.engine-update').closest('.device-entry'),'Shared update depends on an expanded device row or is duplicated');
+    assert($('.engine-update').getBoundingClientRect().bottom<$('.device-columns').getBoundingClientRect().top,'Shared update is not above the device list');
+    const offerNode=$('.engine-update');
+    $('[data-manage-device="test-output"]').click();$('[data-manage-device="test-output"]').click();
+    assert($('.engine-update')===offerNode&&!S.settingsDevice,'Expanding or collapsing a device rebuilt the shared update');
+    window.holdInspection=true;setupRequest('Inspect','test-second');await wait(30);
+    $('[data-engine-act="update"]').click();await wait(20);
+    assert(pendingSetup?.action==='Update'&&$('[data-engine-act="cancel"]'),'Global update cannot wait for a running device check');
+    $('[data-engine-act="cancel"]').click();
+    assert(!setupOperation&&!pendingSetup&&$('[data-engine-act="update"]'),'Queued global update cannot be cancelled with all rows collapsed');
+    window.holdUpdate=true;const engineDraft=JSON.stringify(P().work),beforeUpdate=window.testRequests.length;
+    $('[data-engine-act="update"]').click();await wait(20);
+    assert(!window.testRequests.slice(beforeUpdate).some(r=>r.action==='Update'),'Global update overlapped the running inspection');
+    window.holdInspection=false;window.testSetup({endpoint:'test-second',state:'available',installation:'not_installed',canInstall:true,...engineOffer});await wait(40);
+    const engineRequests=window.testRequests.slice(beforeUpdate).filter(r=>r.op==='setup'&&r.action==='Update');
+    assert(engineRequests.length===1&&engineRequests[0].endpoint==='test-second'&&!S.settingsDevice,'Global action did not use its latest inspected installation independently of the open row');
+    const engineProgress=$('.engine-update');
+    assert($('#engineUpdateTitle').textContent==='Updating the audio engine…'&&!$('[data-engine-act]'),'Engine update lost its global progress or left stale actions');
+    window.testSetup({endpoint:'test-second',state:'checking',busy:true,canInstall:false,canRemove:false});
+    assert($('.engine-update')===engineProgress&&$('#engineUpdateTitle').textContent==='Updating the audio engine…','Verification rebuilt or changed the global update progress');
+    window.holdUpdate=false;window.testSetup({endpoint:'test-second',state:'available',installation:'not_installed',engineState:'current',busy:false,canInstall:true,canUpdate:false});await wait(40);
+    assert(!$('.engine-update')&&JSON.stringify(P().work)===engineDraft,'Engine update lost a draft or retained its offer');
+    acceptSetup({endpoint:'test-output',state:'recovery',installation:'incomplete',engineState:'recovery',canRecoverUpdate:true,engineDevices:['Offline test output']});
+    assert($('[data-engine-act="recover"]')&&!S.settingsDevice&&!$('[data-setup-act="uninstall"]'),'Interrupted update needs an open device row or offers device uninstall');
+    $('[data-engine-act="recover"]').click();await wait(40);
+    assert(window.testRequests.some(r=>r.op==='setup'&&r.action==='RecoverUpdate'),'Engine recovery did not use its fixed action');
+    $('[data-act="back-eq"]').click();await wait(40);
+    results.push('One shared update above collapsed device rows; queue/cancel and recovery independent of row selection; latest inspection targets one action; stable global progress and drafts');
 
     // Installed/idle is editable. A confirmed uninstall wins over stale live
     // status, hides both empty-profile and existing-profile controls, and never

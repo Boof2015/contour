@@ -29,13 +29,14 @@ bool valid_setup_endpoint(std::wstring_view endpoint) {
 }
 std::wstring setup_arguments(const std::filesystem::path& script,std::wstring_view endpoint,std::string_view action) {
     if (!valid_setup_endpoint(endpoint)) { throw std::invalid_argument("Select an available Windows playback output"); }
-    if (action!="Inspect" && action!="Install" && action!="Remove") { throw std::invalid_argument("Unknown setup action"); }
+    if (action!="Inspect" && action!="Install" && action!="Remove" && action!="Update" && action!="RecoverUpdate") { throw std::invalid_argument("Unknown setup action"); }
     return L"-NoLogo -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -File "+quote(script.wstring())+
         L" -Action "+wide(action)+L" -EndpointId "+quote(endpoint);
 }
 bool setup_action_allowed(const Json& report,std::string_view endpoint,std::string_view action) {
     if (report.value("busy",false) || report.value("endpoint",std::string{})!=endpoint) { return false; }
-    return (action=="Install" && report.value("canInstall",false)) || (action=="Remove" && report.value("canRemove",false));
+    return (action=="Install" && report.value("canInstall",false)) || (action=="Remove" && report.value("canRemove",false)) ||
+        (action=="Update" && report.value("canUpdate",false)) || (action=="RecoverUpdate" && report.value("canRecoverUpdate",false));
 }
 DeviceSetup::~DeviceSetup() {
     // Never terminate an elevated mutation. Normal close is guarded while it
@@ -76,7 +77,7 @@ Json DeviceSetup::request(HWND owner,std::wstring endpoint,std::string action) {
     const auto arguments=setup_arguments(script,endpoint,action);
     if (!std::filesystem::is_regular_file(script)) { throw std::runtime_error("Installation files are missing. Download Contour again"); }
     const auto reviewed=reports_.find(endpoint);
-    if (action!="Inspect" && (reviewed==reports_.end() || !setup_action_allowed(reviewed->second,utf8(endpoint),action))) { throw std::runtime_error("Check this device before installing or uninstalling Contour"); }
+    if (action!="Inspect" && (reviewed==reports_.end() || !setup_action_allowed(reviewed->second,utf8(endpoint),action))) { throw std::runtime_error("Check this device before changing the Contour installation"); }
     if (action!="Inspect") { state_=reviewed->second; }
     endpoint_=std::move(endpoint); notice_.clear();
     if (action=="Inspect") { inspect(); return state_; }
@@ -90,9 +91,9 @@ Json DeviceSetup::request(HWND owner,std::wstring endpoint,std::string action) {
     }
     if (!info.hProcess) { throw std::runtime_error("Windows did not return the setup process"); }
     process_=info.hProcess; inspecting_=false; started_=GetTickCount64();
-    state_["busy"]=true; state_["state"]=action=="Install" ? "installing" : "removing";
-    state_["detail"]=action=="Install" ? "Installing Contour..." : "Uninstalling Contour...";
-    state_["canInstall"]=false; state_["canRemove"]=false; state_["notice"]="";
+    state_["busy"]=true; state_["state"]=action=="Install" ? "installing" : action=="Remove" ? "removing" : action=="Update" ? "updating" : "recovering";
+    state_["detail"]=action=="Install" ? "Installing Contour..." : action=="Remove" ? "Uninstalling Contour..." : action=="Update" ? "Updating the audio engine..." : "Recovering the previous audio engine...";
+    state_["canInstall"]=false; state_["canRemove"]=false; state_["canUpdate"]=false;state_["canRecoverUpdate"]=false; state_["notice"]="";
     return state_;
 }
 bool DeviceSetup::poll() {
@@ -123,7 +124,7 @@ bool DeviceSetup::poll() {
     try {
         auto report=Json::parse(text_);
         if (report.at("endpoint")!=utf8(endpoint_) || !report.at("canInstall").is_boolean() || !report.at("canRemove").is_boolean()) { throw std::runtime_error("Invalid setup report"); }
-        if (code!=0) { report["canInstall"]=false; report["canRemove"]=false; }
+        if (code!=0) { report["canInstall"]=false; report["canRemove"]=false;report["canUpdate"]=false;report["canRecoverUpdate"]=false; }
         report["busy"]=false; report["notice"]=notice_; state_=std::move(report);
         reports_[endpoint_]=state_;
     } catch (...) { failed("Cannot read the setup report. Check that the complete setup package is beside Contour.exe."); }

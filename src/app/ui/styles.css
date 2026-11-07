@@ -420,6 +420,9 @@ ul { margin: 0; padding: 0; list-style: none; }
 .welcome .lnk { margin-top:4px; }
 .installation-view { flex:1; padding:32px; }
 .installation-view p { max-width:460px; overflow-wrap:anywhere; }
+.engine-update { margin:0 0 24px; padding:20px 24px; border:1px solid var(--ctl); border-radius:8px; }
+.engine-update h2 { margin:0 0 8px; font-size:15px; }
+.engine-update p { color:var(--text-2); margin:8px 0 12px; }
 .tb .chip { max-width:55%; } .tb .chip .device-name { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .sw { border:0; } button:focus-visible, [role=button]:focus-visible { outline:2px solid var(--text-2); outline-offset:3px; }
 .layers li:focus-visible { outline:2px solid var(--text-2); outline-offset:-2px; }

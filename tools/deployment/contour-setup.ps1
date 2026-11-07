@@ -1,7 +1,7 @@
 # App-owned development setup entry point. No caller-supplied paths, scripts,
 # registry mutations, profile text, or service names cross the elevation boundary.
 [CmdletBinding()]
-param([Parameter(Mandatory=$true)][ValidateSet('Inspect','Install','Remove')][string]$Action,
+param([Parameter(Mandatory=$true)][ValidateSet('Inspect','Install','Remove','Update','RecoverUpdate')][string]$Action,
       [Parameter(Mandatory=$true)][string]$EndpointId)
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
@@ -34,11 +34,105 @@ function Get-SetupPackages {
         Assert-NoLink $dir.FullName; Assert-NoLink $record; Assert-ProtectedSetup $dir.FullName
         $state=Read-SetupJson $record; Assert-SetupState $state $dir.FullName
         # Validate all files we may later read/replace, including recovery data.
-        foreach ($file in Get-ChildItem -LiteralPath $dir.FullName -Force) { Assert-NoLink $file.FullName; Assert-ProtectedSetup $file.FullName }
+        Assert-PackageTree $dir.FullName
         if ($state.State -ne 'Removed' -or $state.AudioRestartPending) {
             [pscustomobject]@{Path=$dir.FullName;State=$state}
         }
     }
+}
+function Assert-PackageTree([string]$Path) {
+    foreach ($file in Get-ChildItem -LiteralPath $Path -Force) {
+        Assert-NoLink $file.FullName;Assert-ProtectedSetup $file.FullName
+        if ($file.PSIsContainer) { Assert-PackageTree $file.FullName }
+    }
+}
+function Test-RuntimeFile([string]$Package,$Build) {
+    $plan=(Read-SetupJson (Join-Path $Package 'journal.json')).Plan
+    Assert-ContourPlan $plan
+    if ($plan.Package -cne $Package) { throw 'Engine files belong to another installation.' }
+    $dll=Get-RuntimeBuildPath $plan $Build
+    Assert-NoLink $dll;Assert-ProtectedSetup $dll
+    if ((Get-FileHash -LiteralPath $dll -Algorithm SHA256).Hash -cne $Build.Sha256) { throw 'The installed engine file changed.' }
+    return $true
+}
+function New-RuntimeCallbacks([string]$Package) {
+    $plan=(Read-SetupJson (Join-Path $Package 'journal.json')).Plan
+    $checker=Join-Path (Split-Path $PSScriptRoot -Parent) 'contour-endpoint-check.exe'
+    @{VerifyBuild={param($Build) Test-RuntimeFile $Package $Build}.GetNewClosure();
+        VerifyOutput={param($SelectedEndpoint,$Build)
+            $arguments=@('present',$SelectedEndpoint)
+            if ($Build.Id -cne 'original') { $arguments+=@(Get-RuntimeBuildPath $plan $Build) }
+            else { $arguments+=@('--allow-inactive') }
+            $output=& $checker @arguments;$code=$LASTEXITCODE
+            if ($code -ne 0) { return [pscustomobject]@{Verified=$false;Inactive=$false} }
+            $result=$output | ConvertFrom-Json
+            [pscustomobject]@{Verified=($result.verified -is [bool] -and $result.verified);
+                Inactive=($null -ne $result.PSObject.Properties['inactive'] -and $result.inactive -eq $true)}
+        }.GetNewClosure();CaptureServices=${function:Capture-SetupServices};StopAudio=${function:Stop-SetupAudio};StartAudio=${function:Start-SetupAudio}}
+}
+function New-RuntimePackage([string]$Package) {
+    $source=Split-Path $PSScriptRoot -Parent;$dll=Join-Path $source 'contour-apo.dll'
+    $build=[pscustomobject]@{Id=[guid]::NewGuid().ToString('D');Sha256=(Get-FileHash -LiteralPath $dll -Algorithm SHA256).Hash}
+    $plan=(Read-SetupJson (Join-Path $Package 'journal.json')).Plan;Assert-ContourPlan $plan
+    $catalog=Read-DeploymentState (Join-Path $Package 'endpoints.json');Assert-NoDeploymentHandoff $catalog
+    if ((Get-RuntimeRecord $catalog $plan).Active.Sha256 -ceq $build.Sha256) { throw 'This engine build is already installed.' }
+    $info=& (Join-Path $source 'contour-deploy-info.exe') $dll --registration-only
+    if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect the new audio engine.' }
+    $info=$info | ConvertFrom-Json
+    if ($info.Schema -ne 1 -or $info.EmbeddedManifest -or @($info.Classes).Count -ne 2) { throw 'Unsupported engine registration.' }
+    for ($i=0;$i -lt 2;++$i) {
+        $cls=$info.Classes[$i];if ($cls.Clsid -cne $script:ClassIds[$i]) { throw 'Engine class identities changed.' }
+        $prefix='SOFTWARE\Classes\AudioEngine\AudioProcessingObjects\'+$cls.Clsid
+        $values=@($plan.Changes | Where-Object Path -eq $prefix)
+        if ($values.Count -ne @($cls.Values).Count) { throw 'The new engine requires a different registration format.' }
+        foreach ($value in $values) {
+            $candidate=@($cls.Values | Where-Object Name -ceq $value.Name)
+            if ($candidate.Count -ne 1 -or -not (Test-RawEqual $candidate[0] $value.After)) { throw 'The new engine requires a different registration format.' }
+        }
+    }
+    $path=Split-Path (Get-RuntimeBuildPath $plan $build) -Parent
+    if (Test-Path -LiteralPath $path) { throw 'Engine staging folder already exists.' }
+    [void][IO.Directory]::CreateDirectory($path)
+    foreach ($name in @('contour-apo.dll','contour-deploy-info.exe','contour-apo-host.exe','contour-endpoint-check.exe')) {
+        Copy-Item -LiteralPath (Join-Path $source $name) -Destination (Join-Path $path $name)
+    }
+    Copy-Item -LiteralPath (Join-Path $Package 'profile.contour') -Destination (Join-Path $path 'profile.contour')
+    $scripts=Join-Path $path 'setup';[void][IO.Directory]::CreateDirectory($scripts)
+    foreach ($name in @(Get-SetupScriptNames)) { Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $scripts $name) }
+    Assert-PackageTree $Package
+    [void](Test-RuntimeFile $Package $build)
+    $validation=& (Join-Path $path 'contour-apo-host.exe') (Join-Path $path 'contour-apo.dll')
+    $validationCode=$LASTEXITCODE
+    [IO.File]::WriteAllLines((Join-Path $path 'validation.log'),[string[]]$validation)
+    if ($validationCode -ne 0) { throw 'The new engine failed its checks. Your installed engine was not changed. Details are in the staged engine validation.log.' }
+    [void](Test-RuntimeFile $Package $build)
+    return $build
+}
+function Get-SetupScriptNames {
+    @('contour-setup.ps1','DeviceSetup.ps1','AudioPolicy.ps1','SharedSetup.ps1','EndpointDeployment.ps1','RuntimeUpdate.ps1','LegacyMigration.ps1','ControlContext.ps1','Deployment.ps1','EffectPlacement.ps1','RegistryStore.cs')
+}
+function Set-EngineInspection($Store,$Package,$Report) {
+    $plan=(Read-SetupJson (Join-Path $Package.Path 'journal.json')).Plan;Assert-ContourPlan $plan
+    $catalog=if ($Package.State.Schema -eq 3) { Read-DeploymentState (Join-Path $Package.Path 'endpoints.json') } else { [pscustomobject]@{Schema=2} }
+    $runtime=Get-RuntimeRecord $catalog $plan
+    $Report.engineDevices=@(if ($Package.State.Schema -eq 3) {
+        foreach ($binding in $catalog.Bindings) { (Get-SharedContext $Package.State $binding.EndpointId).Name }
+    } else { $Package.State.Name })
+    $Report.installedEngine=$runtime.Active.Sha256
+    $Report.canUpdate=$false;$Report.canRecoverUpdate=$false
+    if ($null -ne $runtime.Update) {
+        $Report.engineState='recovery';$Report.canRecoverUpdate=$true;$Report.canInstall=$false;$Report.canRemove=$false
+        $Report.detail='An engine update was interrupted. Recover the previous engine before making further changes.'
+        return
+    }
+    [void](Test-RuntimeFile $Package.Path $runtime.Active)
+    $available=(Get-FileHash -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'contour-apo.dll') -Algorithm SHA256).Hash
+    $Report.availableEngine=$available
+    $Report.engineState=if ($available -cne $runtime.Active.Sha256) { 'update_available' } else { 'current' }
+    $Report.canUpdate=$Report.engineState -eq 'update_available' -and $Report.state -in @('attached','available') -and
+        ($Package.State.Schema -eq 3 -or ($Package.State.Schema -eq 1 -and $Package.State.State -eq 'Attached' -and -not $Package.State.AudioRestartPending))
+    if ($Package.State.Schema -eq 3 -and ($null -ne $catalog.Operation -or @($Package.State.Contexts | Where-Object ContextState -eq 'Provisioning').Count)) { $Report.canUpdate=$false }
+    if ($runtime.LastError) { $Report.engineDetail=$runtime.LastError }
 }
 function Read-PackageInfo([string]$SelectedEndpoint=$EndpointId) {
     $binary=Join-Path (Split-Path $PSScriptRoot -Parent) 'contour-deploy-info.exe'
@@ -62,12 +156,17 @@ function New-SharedCallbacks($Store,[string]$Package) {
     $verify={param($SelectedEndpoint,$Registration,$Binding)
         Assert-SharedRegistration $Store $Package $Registration
         $plan=(Read-SetupJson (Join-Path $Package 'journal.json')).Plan
-        if ((Get-FileHash -LiteralPath $plan.TargetDll -Algorithm SHA256).Hash -cne $plan.DllSha256) { throw 'The installed APO file changed.' }
+        $catalog=Read-DeploymentState (Join-Path $Package 'endpoints.json')
+        [void](Test-RuntimeFile $Package (Get-RuntimeRecord $catalog $plan).Active)
         $true
     }.GetNewClosure()
     $applied={param($SelectedEndpoint,$Registration,$Binding)
         $mode=if ($null -eq $Binding) { 'absent' } else { 'present' }
-        $result=& $checker $mode $SelectedEndpoint
+        $arguments=@($mode,$SelectedEndpoint)
+        $plan=(Read-SetupJson (Join-Path $Package 'journal.json')).Plan
+        $catalog=Read-DeploymentState (Join-Path $Package 'endpoints.json');$build=(Get-RuntimeRecord $catalog $plan).Active
+        if ($null -ne $Binding -and $build.Id -cne 'original') { $arguments+=@(Get-RuntimeBuildPath $plan $build) }
+        $result=& $checker @arguments
         if ($LASTEXITCODE -ne 0) { return $false }
         $report=$result | ConvertFrom-Json
         return ($report.verified -is [bool] -and $report.verified)
@@ -84,8 +183,12 @@ function Test-InstalledSetup([string]$SelectedEndpoint) {
 }
 function Set-SharedInspection($Store,$Package,$Report) {
     $record=$Package.State;$catalog=Read-DeploymentState (Join-Path $Package.Path 'endpoints.json')
-    Assert-SharedCatalog $catalog $record
+    Assert-SharedCatalog $catalog $record -AllowRuntimeUpdate
     $Report.package=$Package.Path
+    if ($catalog.Schema -eq 4 -and $null -ne $catalog.Runtime.Update) {
+        $Report.state='recovery';$Report.installation=if ($null -ne (Get-Binding $catalog $EndpointId)) { 'incomplete' } else { 'not_installed' }
+        $Report.reason='engine_update';return
+    }
     if ($null -ne $catalog.Operation -and $catalog.Operation.EndpointId -ieq $EndpointId) {
         $Report.state='recovery';$Report.installation='incomplete';$Report.canRemove=$true
         $Report.detail='An interrupted device operation needs recovery. Uninstall Contour from the affected device before continuing.'
@@ -154,7 +257,7 @@ function New-SetupPackage($Plan) {
     # Retain self-contained recovery alongside the DLL. Installed files are
     # immutable; a rebuild in the workspace never overwrites a loaded APO.
     $scripts=Join-Path $path 'setup'; [void][IO.Directory]::CreateDirectory($scripts)
-    foreach ($name in @('contour-setup.ps1','DeviceSetup.ps1','AudioPolicy.ps1','SharedSetup.ps1','EndpointDeployment.ps1','LegacyMigration.ps1','ControlContext.ps1','Deployment.ps1','EffectPlacement.ps1','RegistryStore.cs')) {
+    foreach ($name in @(Get-SetupScriptNames)) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $scripts $name)
     }
     if ((Get-FileHash -LiteralPath $Plan.TargetDll -Algorithm SHA256).Hash -cne $Plan.DllSha256) { throw 'The APO changed while it was staged. No device settings were changed.' }
@@ -255,7 +358,15 @@ try {
             try { [void](New-SetupPlan $store); $report.canInstall=$true }
             catch { $report.state='blocked'; $report.reason=[string]$_.Exception.Data['reason']; $report.detail=$_.Exception.Message }
         }
+        if ($packages.Count -eq 1 -and $packages[0].State.Schema -in @(1,3)) { Set-EngineInspection $store $packages[0] $report }
         $report | ConvertTo-Json -Compress
+    } elseif ($Action -in @('Update','RecoverUpdate')) {
+        if ($packages.Count -ne 1) { throw 'A single managed Contour installation is required.' }
+        $p=$packages[0]
+        if ($p.State.Schema -ne 3) { ConvertTo-SharedSetup $store $p.Path (Read-SetupAdapter $p.State.EndpointId) }
+        $build=if ($Action -eq 'Update') { New-RuntimePackage $p.Path } else { $null }
+        $callbacks=New-RuntimeCallbacks $p.Path
+        Invoke-RuntimeUpdate $store $p.Path $build @callbacks
     } elseif ($Action -eq 'Install') {
         if ($selected.Count) { throw 'Contour is already installed on this device, or needs recovery.' }
         [void](Capture-SetupServices)

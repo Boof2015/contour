@@ -18,6 +18,12 @@ inline constexpr PROPERTYKEY preview_status_key{control_context,2};
 // Property 3 is installer metadata in Default. Property 4 is one complete
 // native profile in User; it is independent of volatile preview requests.
 inline constexpr PROPERTYKEY saved_profile_key{control_context,4};
+// Separate, optional volatile evidence: old status readers remain compatible.
+inline constexpr PROPERTYKEY engine_identity_key{control_context,5};
+inline constexpr std::size_t max_engine_identity_bytes = 28+32767*2;
+struct EngineIdentity { GUID runtime{}; std::wstring module_path; };
+std::string encode_engine_identity(const EngineIdentity& identity);
+EngineIdentity decode_engine_identity(std::string_view bytes);
 inline constexpr std::size_t max_saved_profile_bytes = 1024*1024;
 inline constexpr std::size_t max_request_bytes = 1024*1024+52;
 inline constexpr std::size_t max_status_bytes = 76+2048+8+32;

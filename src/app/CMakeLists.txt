@@ -35,6 +35,7 @@ add_custom_target(contour-ui-assets ALL
         "${PROJECT_SOURCE_DIR}/tools/deployment/AudioPolicy.ps1"
         "${PROJECT_SOURCE_DIR}/tools/deployment/SharedSetup.ps1"
         "${PROJECT_SOURCE_DIR}/tools/deployment/EndpointDeployment.ps1"
+        "${PROJECT_SOURCE_DIR}/tools/deployment/RuntimeUpdate.ps1"
         "${PROJECT_SOURCE_DIR}/tools/deployment/LegacyMigration.ps1"
         "${PROJECT_SOURCE_DIR}/tools/deployment/ControlContext.ps1"
         "${PROJECT_SOURCE_DIR}/tools/deployment/Deployment.ps1"

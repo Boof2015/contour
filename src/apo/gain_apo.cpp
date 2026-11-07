@@ -402,6 +402,16 @@ void GainApo::control_worker() noexcept {
             const auto result=control_git_->GetInterfaceFromGlobal(control_cookie_,IID_PPV_ARGS(&store));
             if (FAILED(result)) { throw std::runtime_error("Cannot marshal effects settings store to control worker"); }
             eq::PreviewProcessor processor(live_eq_,sample_rate_,channels_,last_profile_error_,startup_fingerprint_);
+            // This runs on the control worker, never in APOProcess. Correlating
+            // the loaded module with this runtime prevents stale build evidence.
+            try {
+                std::wstring path(32768,L'\0');
+                const auto size=GetModuleFileNameW(module_instance,path.data(),static_cast<DWORD>(path.size()));
+                if (!size || size>=path.size()) { throw std::runtime_error("Cannot identify the loaded engine"); }
+                path.resize(size);
+                eq::write_control_value(*store.Get(),eq::engine_identity_key,
+                    eq::encode_engine_identity({processor.poll().runtime,std::move(path)}));
+            } catch (...) {} // Identity failure must not stop EQ or its control path.
             std::string seen;
             const auto report=[&](const eq::PreviewStatus& status) {
                 eq::write_control_value(*store.Get(),eq::preview_status_key,eq::encode_status(status));

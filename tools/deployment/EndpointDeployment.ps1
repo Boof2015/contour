@@ -6,6 +6,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'ControlContext.ps1')
+. (Join-Path $PSScriptRoot 'RuntimeUpdate.ps1')
 $script:ComponentClassIds=@('{C96CE6C1-7F62-46A5-BDFF-46FCA19567AB}','{C2DB4B2B-8B4D-43C2-BCC3-A2B0D3E8FBA1}')
 
 function Assert-DeploymentId([string]$Id) {
@@ -40,7 +41,7 @@ function Assert-Binding($State,$Binding) {
     $registration=Get-Registration $State $Binding.RegistrationId
     $placement=Get-BindingPlacement $Binding
     if ($null -ne $placement) {
-        if ($State.Schema -ne 3 -or $registration.Mode -ne 'Legacy') { throw 'Composite placement requires a current global-registration catalog.' }
+        if ($State.Schema -notin @(3,4) -or $registration.Mode -ne 'Legacy') { throw 'Composite placement requires a current global-registration catalog.' }
         Assert-CompositePlacement $placement
     }
     if ($registration.Mode -eq 'Component' -and $registration.AdapterId -ine $Binding.AdapterId) {
@@ -57,12 +58,14 @@ function Get-DeploymentHandoff($State) {
     if ($null -ne $State.PSObject.Properties['Handoff']) { return $State.Handoff }
     return $null
 }
-function Assert-NoDeploymentHandoff($State) {
+function Assert-NoDeploymentHandoff($State,[switch]$AllowRuntimeUpdate) {
     if ($null -ne (Get-DeploymentHandoff $State)) { throw 'Finish the installation handoff before changing devices or packages.' }
+    if (-not $AllowRuntimeUpdate) { Assert-NoRuntimeUpdate $State }
 }
 function Assert-DeploymentState($State) {
-    if ($State.Schema -notin @(1,2,3) -or $State.Kind -cne 'ContourEndpointDeployment' -or
+    if ($State.Schema -notin @(1,2,3,4) -or $State.Kind -cne 'ContourEndpointDeployment' -or
         ($State.Revision -isnot [long] -and $State.Revision -isnot [int]) -or $State.Revision -lt 0) { throw 'Invalid deployment state.' }
+    if ($State.Schema -ne 4 -and $null -ne $State.PSObject.Properties['Runtime']) { throw 'Engine ownership cannot be read with an older catalog schema.' }
     $ids=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     $packages=@{};$identities=@{}
     foreach ($registration in $State.Registrations) {
@@ -108,6 +111,7 @@ function Assert-DeploymentState($State) {
             throw 'Installation handoff lost endpoint ownership.'
         }
     }
+    Assert-RuntimeCatalog $State
     $op=$State.Operation
     if ($null -eq $op) { return }
     Assert-DeploymentId $op.Id
@@ -273,7 +277,7 @@ function Import-LegacyEndpoint($Store,[string]$Path,$Attachment,$Context,[string
         $record=Get-LegacyEndpointRecord $Store $Attachment $Context $AdapterId
         $registration=$record.Registration;$binding=$record.Binding
         Add-RegistrationRecord $state $registration
-        if ($null -ne (Get-BindingPlacement $binding)) { $state.Schema=3 }
+        if ($null -ne (Get-BindingPlacement $binding) -and $state.Schema -lt 3) { $state.Schema=3 }
         $current=Get-Binding $state $binding.EndpointId
         if ($null -ne $current) {
             if ($current.AdapterId -ine $AdapterId -or $current.RegistrationId -ine $registration.Id) { throw 'Endpoint already has a different owner.' }
@@ -381,7 +385,7 @@ function Invoke-EndpointTransitionCore($Store,[string]$Path,[ValidateSet('Attach
     if (($Action -eq 'Attach' -and $null -ne $before) -or ($Action -ne 'Attach' -and $null -eq $before)) { throw 'Endpoint ownership does not permit this action.' }
     if ($Action -eq 'Attach') {
         $available=Get-AvailableEffectPlacement $Store $EndpointId
-        if ($null -ne $available) { $state.Schema=3;$after | Add-Member NoteProperty Placement $available }
+        if ($null -ne $available) { if ($state.Schema -lt 3) { $state.Schema=3 };$after | Add-Member NoteProperty Placement $available }
     }
     $placement=Get-TransitionPlacement $before $after
     if ($null -ne $after) { Assert-Binding $state $after }

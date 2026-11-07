@@ -123,6 +123,11 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME apo-contract COMMAND contour-apo-host $<TARGET_FILE:contour-apo>)
     add_test(NAME apo-component-contract COMMAND contour-apo-host $<TARGET_FILE:contour-apo> --component)
+    add_test(NAME apo-packaged-contract COMMAND powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/apo_package_tests.ps1"
+        -BinaryDirectory $<TARGET_FILE_DIR:contour-apo>
+        -WorkDirectory "${CMAKE_BINARY_DIR}/apo-package-tests")
+    set_tests_properties(apo-packaged-contract PROPERTIES TIMEOUT 60)
     add_test(NAME component-package COMMAND powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/component_package_tests.ps1"
         -BinaryDirectory $<TARGET_FILE_DIR:contour-apo>

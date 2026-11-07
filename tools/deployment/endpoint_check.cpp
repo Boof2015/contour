@@ -7,13 +7,13 @@
 
 int wmain(int argc,wchar_t** argv) {
     using namespace contour::app;
-    if(argc!=3 || !valid_setup_endpoint(argv[2]) ||
+    if((argc!=3 && argc!=4) || !valid_setup_endpoint(argv[2]) ||
        (std::wstring_view(argv[1])!=L"present" && std::wstring_view(argv[1])!=L"absent")) {
-        std::cerr<<"Usage: contour-endpoint-check <present|absent> <playback-endpoint-ID>\n";return 2;
+        std::cerr<<"Usage: contour-endpoint-check <present|absent> <playback-endpoint-ID> [expected-engine.dll]\n";return 2;
     }
     try {
         const bool expected=std::wstring_view(argv[1])==L"present";
-        if(!expected) {
+        if(!expected || argc==4) {
             const auto com=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);
             if(FAILED(com))throw std::runtime_error("Cannot initialize device inspection");
             bool inactive=false;
@@ -34,9 +34,11 @@ int wmain(int argc,wchar_t** argv) {
         while(GetTickCount64()-start<10000) {
             const auto result=connection.status(argv[2]);
             if(!result.busy&&result.finished) {
-                const bool verified=result.streaming&&result.confirmed==expected;
+                const bool identity=argc==3 || std::wstring_view(argv[3])==L"--allow-inactive" || (expected&&!result.engine_path.empty()&&_wcsicmp(result.engine_path.c_str(),argv[3])==0);
+                const bool verified=result.streaming&&result.confirmed==expected&&identity;
                 std::cout<<Json({{"verified",verified},{"streaming",result.streaming},
-                    {"confirmed",result.confirmed},{"detail",result.detail}}).dump()<<'\n';
+                    {"confirmed",result.confirmed},{"enginePath",utf8(result.engine_path)},
+                    {"detail",identity?result.detail:"The responding engine does not match the requested build."}}).dump()<<'\n';
                 return verified?0:1;
             }
             Sleep(20);

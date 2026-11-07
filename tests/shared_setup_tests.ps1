@@ -12,6 +12,17 @@ function Callbacks($Store,[string]$Package) {
         VerifyRegistration={param($Endpoint,$Registration,$Binding) Assert-SharedRegistration $Store $Package $Registration;$true}.GetNewClosure();
         VerifyApplied={param($Endpoint,$Registration,$Binding) $true}}
 }
+function UpdateBuild { [pscustomobject]@{Id='33333333-3333-4333-8333-333333333333';Sha256=('B'*64)} }
+function UpdateCallbacks($Store,[string]$Package) {
+    $base=Callbacks $Store $Package
+    $plan=(Read-SetupJson (Join-Path $Package 'journal.json')).Plan
+    @{CaptureServices=$base.CaptureServices;StopAudio=$base.StopAudio;StartAudio=$base.StartAudio;
+        VerifyBuild={param($Build) $true};
+        VerifyOutput={param($Endpoint,$Build)
+            Assert-RuntimeRegistration $Store $plan $Build
+            [pscustomobject]@{Verified=$true;Inactive=$false}
+        }.GetNewClosure()}
+}
 if ($Worker) {
     # TerminateProcess models a crash without running CLR shutdown/finalizers.
     # Environment.Exit can time out while registry handles are still live.
@@ -29,7 +40,12 @@ public static class ContourSharedSetupCrash {
     $key=$user.OpenSubKey($f.Registry,$true);$store=[Contour.Deployment.RegistryStore]::new($key,$true)
     $callbacks=Callbacks $store $f.Package
     $checkpoint={param($Point) if ($Point -eq $CrashAt) { [ContourSharedSetupCrash]::Stop() }}
-    if ($Mode -eq 'Convert') { ConvertTo-SharedSetup $store $f.Package 'USB\A\1' $checkpoint }
+    if ($Mode -in @('Runtime','RuntimeRollback')) {
+        $updates=UpdateCallbacks $store $f.Package
+        if ($Mode -eq 'RuntimeRollback') { $updates.VerifyOutput={param($Endpoint,$Build) [pscustomobject]@{Verified=($Build.Id -eq 'original');Inactive=$false}} }
+        Invoke-RuntimeUpdate $store $f.Package (UpdateBuild) @updates -Checkpoint $checkpoint
+    }
+    elseif ($Mode -eq 'Convert') { ConvertTo-SharedSetup $store $f.Package 'USB\A\1' $checkpoint }
     elseif ($Mode -eq 'Policy') { Enable-UnsignedAudio $store (Join-Path $f.Package 'policy-crash.json') $checkpoint }
     else { Invoke-SharedDeviceSetup $store $f.Package Install $f.B 'Fixture B' 'USB\B\2' @callbacks -Checkpoint $checkpoint }
     throw 'Crash checkpoint was not reached.'
@@ -309,6 +325,87 @@ public static class ContourJournalReader {
         Assert ($f.Store.Snapshot($fx) -ceq $before) 'Unsupported effects were mutated.'
         ++$passed;Write-Output "PASS reject unsupported composite arrangement: $bad"
     }
+    function New-UpdateFixture {
+        $f=New-Fixture;ConvertTo-SharedSetup $f.Store $f.Package 'USB\A\1'
+        Set-VendorEffects $f.Store $f.B;$callbacks=Callbacks $f.Store $f.Package
+        Invoke-SharedDeviceSetup $f.Store $f.Package Install $f.B 'Fixture B' 'USB\B\2' @callbacks
+        $f.Store.Write((Get-ControlContextKeys $f.B)[2],$script:ControlContextId+',4',3,'DDEEFF')
+        $f | Add-Member NoteProperty EndpointsBefore (@($f.A,$f.B | ForEach-Object { $f.Store.Snapshot((Get-EndpointPath $_)) }) | ConvertTo-Json -Compress)
+        return $f
+    }
+    function UpdateUnchanged($f) {
+        Assert ((@($f.A,$f.B | ForEach-Object { $f.Store.Snapshot((Get-EndpointPath $_)) }) | ConvertTo-Json -Compress) -ceq $f.EndpointsBefore) 'Update changed endpoint assignments or saved EQ.'
+        Assert ([IO.File]::ReadAllText((Join-Path $f.Package 'audio.txt')) -eq 'running') 'Update left audio stopped.'
+        Assert (Test-RawEqual ($f.Store.Read($script:AudioSettings,'DisableProtectedAudioDG')) (Get-UnsignedAudioValue)) 'Update altered the compatibility setting.'
+    }
+    $f=New-UpdateFixture;$updates=UpdateCallbacks $f.Store $f.Package
+    Invoke-RuntimeUpdate $f.Store $f.Package (UpdateBuild) @updates
+    $catalog=Read-DeploymentState (Join-Path $f.Package 'endpoints.json')
+    Assert ($catalog.Schema -eq 4 -and $catalog.Runtime.Active.Sha256 -ceq ('B'*64) -and $null -eq $catalog.Runtime.Update) 'Engine update did not commit.'
+    UpdateUnchanged $f
+    Fails { Invoke-RuntimeUpdate $f.Store $f.Package (UpdateBuild) @updates }
+    $callbacks=Callbacks $f.Store $f.Package
+    Invoke-SharedDeviceSetup $f.Store $f.Package Remove $f.B '' '' @callbacks
+    Invoke-SharedDeviceSetup $f.Store $f.Package Install $f.B 'Fixture B' 'USB\B\2' @callbacks
+    Assert ((Read-DeploymentState (Join-Path $f.Package 'endpoints.json')).Schema -eq 4) 'Composite reinstall downgraded engine ownership.'
+    UpdateUnchanged $f
+    $next=[pscustomobject]@{Id='44444444-4444-4444-8444-444444444444';Sha256=('C'*64)}
+    Invoke-RuntimeUpdate $f.Store $f.Package $next @updates
+    Assert ((Read-DeploymentState (Join-Path $f.Package 'endpoints.json')).Runtime.Active.Sha256 -ceq ('C'*64)) 'Second engine update failed.'
+    $updates.VerifyOutput={param($Endpoint,$Build) [pscustomobject]@{Verified=($Build.Sha256 -ceq ('C'*64));Inactive=$false}}
+    Fails { Invoke-RuntimeUpdate $f.Store $f.Package (UpdateBuild) @updates }
+    Assert ((Read-DeploymentState (Join-Path $f.Package 'endpoints.json')).Runtime.Active.Sha256 -ceq ('C'*64)) 'Rollback lost the previous versioned engine.'
+    $downgrade=Read-DeploymentState (Join-Path $f.Package 'endpoints.json');$downgrade.Schema=3;Fails { Assert-DeploymentState $downgrade }
+    ++$passed;Write-Output 'PASS versioned engine updates preserve legacy/composite attachments, EQ, policy and subsequent device management'
+    foreach ($point in @('update-prepared','update-audio-stopped','update-intent-0','update-written-0','update-intent-1','update-written-1','update-audio-restarted','update-verified','update-committed')) {
+        $f=New-UpdateFixture;Crash $f Runtime $point;$updates=UpdateCallbacks $f.Store $f.Package
+        $catalog=Read-DeploymentState (Join-Path $f.Package 'endpoints.json')
+        if ($point -ne 'update-committed') {
+            $devices=Callbacks $f.Store $f.Package
+            Fails { Invoke-SharedDeviceSetup $f.Store $f.Package Remove $f.A '' '' @devices }
+            Invoke-RuntimeUpdate $f.Store $f.Package $null @updates
+        }
+        $catalog=Read-DeploymentState (Join-Path $f.Package 'endpoints.json')
+        Assert ($null -eq $catalog.Runtime.Update) 'Interrupted engine update retained recovery state.'
+        Assert ($catalog.Runtime.Active.Sha256 -ceq $(if ($point -eq 'update-committed') { 'B'*64 } else { 'A'*64 })) 'Crash recovered the wrong engine.'
+        Assert-RuntimeRegistration $f.Store (Read-SetupJson (Join-Path $f.Package 'journal.json')).Plan $catalog.Runtime.Active
+        UpdateUnchanged $f;++$passed;Write-Output "PASS engine worker termination at $point"
+    }
+    $f=New-UpdateFixture;$updates=UpdateCallbacks $f.Store $f.Package
+    $updates.VerifyOutput={param($Endpoint,$Build) [pscustomobject]@{Verified=($Build.Id -eq 'original');Inactive=$false}}
+    Fails { Invoke-RuntimeUpdate $f.Store $f.Package (UpdateBuild) @updates }
+    $catalog=Read-DeploymentState (Join-Path $f.Package 'endpoints.json')
+    Assert ($catalog.Runtime.Active.Id -eq 'original' -and $null -eq $catalog.Runtime.Update) 'Failed engine did not roll back.'
+    UpdateUnchanged $f;++$passed;Write-Output 'PASS failed engine loading rolls back all shared class paths and preserves every output'
+    $f=New-UpdateFixture;$updates=UpdateCallbacks $f.Store $f.Package
+    $updates.VerifyBuild={param($Build) $Build.Id -eq 'original'}
+    Fails { Invoke-RuntimeUpdate $f.Store $f.Package (UpdateBuild) @updates }
+    Unchanged $f;UpdateUnchanged $f;++$passed;Write-Output 'PASS unverifiable candidate rejected before switching or stopping audio'
+    $f=New-UpdateFixture;$updates=UpdateCallbacks $f.Store $f.Package
+    $updates.VerifyOutput={param($Endpoint,$Build) [pscustomobject]@{Verified=$true;Inactive=$true}}
+    Invoke-RuntimeUpdate $f.Store $f.Package (UpdateBuild) @updates
+    Assert ((Read-DeploymentState (Join-Path $f.Package 'endpoints.json')).Runtime.Deferred.Count -eq 2) 'Disconnected devices falsely claimed live verification.'
+    UpdateUnchanged $f;++$passed;Write-Output 'PASS disconnected attachments retained with deferred live verification'
+    $f=New-UpdateFixture;$updates=UpdateCallbacks $f.Store $f.Package
+    $changedPath='SOFTWARE\Classes\CLSID\'+$script:ClassIds[0]+'\InprocServer32'
+    $foreign=[pscustomobject]@{Type=1;Data=(ConvertTo-HexString 'C:\Foreign\engine.dll')}
+    $checkpoint={param($Point) if ($Point -eq 'update-written-0') { $f.Store.Write($changedPath,'',$foreign.Type,$foreign.Data);throw 'Injected external writer' }}
+    Fails { Invoke-RuntimeUpdate $f.Store $f.Package (UpdateBuild) @updates -Checkpoint $checkpoint }
+    Assert (Test-RawEqual ($f.Store.Read($changedPath,'')) $foreign) 'Rollback overwrote a foreign registration.'
+    Assert ((Read-DeploymentState (Join-Path $f.Package 'endpoints.json')).Runtime.Update.Phase -eq 'RecoveryRequired') 'Foreign registration lost recovery intent.'
+    UpdateUnchanged $f;++$passed;Write-Output 'PASS conflicting registration preserved and audio restarted with explicit recovery state'
+    foreach ($point in @('restored-1','restored-0','rollback-audio-restarted')) {
+        $f=New-UpdateFixture;Crash $f RuntimeRollback $point;$updates=UpdateCallbacks $f.Store $f.Package
+        Invoke-RuntimeUpdate $f.Store $f.Package $null @updates
+        Assert ((Read-DeploymentState (Join-Path $f.Package 'endpoints.json')).Runtime.Active.Id -eq 'original') 'Interrupted rollback failed to restore the original engine.'
+        UpdateUnchanged $f;++$passed;Write-Output "PASS worker termination during engine rollback at $point"
+    }
+    $f=New-UpdateFixture;$callbacks=Callbacks $f.Store $f.Package
+    foreach ($id in @($f.A,$f.B)) { Invoke-SharedDeviceSetup $f.Store $f.Package Remove $id '' '' @callbacks }
+    $updates=UpdateCallbacks $f.Store $f.Package;Invoke-RuntimeUpdate $f.Store $f.Package (UpdateBuild) @updates
+    $catalog=Read-DeploymentState (Join-Path $f.Package 'endpoints.json')
+    Assert ($catalog.Runtime.Active.Sha256 -ceq ('B'*64) -and $catalog.Bindings.Count -eq 0) 'Retained runtime without attachments could not update.'
+    ++$passed;Write-Output 'PASS retained runtime updates with no attached devices'
     Write-Output "$passed shared setup cases passed; no real audio or HKLM changes."
 } catch {
     Write-Output $_.ScriptStackTrace

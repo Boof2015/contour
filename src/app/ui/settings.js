@@ -1,7 +1,7 @@
 // Device management does not change the output/profile open in the editor.
 const setupReports=new Map();
 const setupCache=new Map();
-let scanQueue=[],scanStarting=false,setupOperation=null,pendingSetup=null,inventoryRefreshing=false;
+let scanQueue=[],scanStarting=false,setupOperation=null,pendingSetup=null,inventoryRefreshing=false,engineSetup=null;
 const setupDevice=()=>APP.devices.find(d=>d.id===S.settingsDevice);
 const setupDeviceStamp=d=>JSON.stringify([d.available,d.state,d.channels,d.rate,d.mask]);
 const inspectingDevice=id=>(SETUP.busy||scanStarting)&&SETUP.endpoint===id;
@@ -14,10 +14,12 @@ function prioritizeCheck(endpoint){
   scanQueue=[endpoint,...scanQueue.filter(id=>id!==endpoint)];scanNext();
 }
 const installation=s=>s?.installation||(s?.state==='attached'?'installed':s?.state==='recovery'?'incomplete':s?.state==='available'?'not_installed':'unknown');
+const setupProgress=action=>({Inspect:'checking',Install:'installing',Remove:'removing',Update:'updating',RecoverUpdate:'recovering'}[action]);
 // Installation is independent of profiles and of whether audio is playing.
 // A retained settings context/old runtime report is not proof of attachment.
 function editorGate(){
   if(!APP)return 'checking';
+  if(['Update','RecoverUpdate'].includes(setupOperation?.action))return setupProgress(setupOperation.action);
   const d=D(),s=setupReports.get(d.id),operation=setupOperation?.endpoint===d.id?setupOperation.action:null;
   if(operation)return operation==='Install'?'installing':'removing';
   if(installation(s)==='installed')return '';
@@ -43,6 +45,8 @@ function installationView(gate){
     checking:['Checking this device…','Checking whether Contour is installed.',''],
     installing:['Installing Contour…','Audio will return when installation finishes.',''],
     removing:['Uninstalling Contour…','Your profiles will be kept.',''],
+    updating:['Updating the audio engine…','Your EQ and installed devices will be kept.',''],
+    recovering:['Recovering the audio engine…','Restoring the previous engine for your installed devices.',''],
     attention:['Installation needs attention','Review this device’s installation in Settings.','Manage device'],
     unknown:['Couldn’t check this device','Review its installation status in Settings before editing EQ.','Check device'],
     disconnected:['This device is disconnected','Reconnect '+D().name+' to check its installation.','Manage device']
@@ -52,7 +56,7 @@ function installationView(gate){
   return `<main class="welcome installation-view" aria-labelledby="installationTitle"><h2 id="installationTitle">${esc(title)}</h2><p role="status">${esc(unsupported?deviceMessage(D(),s):detail)}</p>${action?`<button class="prim" data-act="device-setup">${unsupported?'Manage device':action}</button>`:''}</main>`;
 }
 function installationLabel(s){
-  if(s?.busy)return s.state==='installing'?'Installing…':s.state==='removing'?'Uninstalling…':'Checking…';
+  if(s?.busy)return {installing:'Installing…',removing:'Uninstalling…',updating:'Updating…',recovering:'Recovering…'}[s.state]||'Checking…';
   return {installed:'Installed',not_installed:'Not installed',incomplete:'Needs attention',unknown:'Not checked'}[installation(s)];
 }
 function compatibilityLabel(d,s){
@@ -72,13 +76,26 @@ function settingsView(){
 function generalSettings(){
   return `<div class="settings-head"><h1>General</h1></div><section class="preference-row"><div><h2>Appearance</h2><p>Choose how Contour looks.</p></div><div class="theme-options" role="group" aria-label="Appearance">${['dark','light'].map(theme=>`<button data-theme-choice="${theme}" aria-pressed="${S.theme===theme}">${theme==='dark'?'Dark':'Light'}</button>`).join('')}</div></section>`;
 }
+function engineUpdateView(){
+  const operation=['Update','RecoverUpdate'].includes(setupOperation?.action)?setupOperation:null;
+  const s=engineSetup,recovery=operation?operation.action==='RecoverUpdate':s?.canRecoverUpdate;
+  if(!operation&&!s?.canRecoverUpdate&&!s?.canUpdate)return '';
+  const queued=operation&&!!pendingSetup;
+  const title=operation?(queued?'Waiting for the current device check…':recovery?'Recovering the audio engine…':'Updating the audio engine…'):recovery?'Recover the audio engine':'Audio engine update available';
+  const detail=operation?(recovery?'Restoring the previous engine':'Updating the audio engine'):(recovery?'Restore the previous engine':'Update Contour’s audio processing');
+  const controls=queued?'<button class="settings-button" data-engine-act="cancel">Cancel</button>':operation?'':`<button class="settings-button primary" data-engine-act="${recovery?'recover':'update'}" ${setupOperation?'disabled':''}>${recovery?'Recover engine':'Update engine'}</button>`;
+  return `<section class="engine-update" aria-labelledby="engineUpdateTitle"><h2 id="engineUpdateTitle">${title}</h2><p ${operation?'role="status"':''}>${detail} for all installed devices. Your EQ and device installations will be kept.</p>${s?.engineDevices?.length?`<p>${s.engineDevices.map(esc).join(' · ')}</p>`:''}${!operation?'<p>Windows will ask for administrator approval. Audio will briefly stop. Disconnected devices will use the engine when they reconnect.</p>':''}${s?.notice?`<p class="settings-notice">${esc(s.notice)}</p>`:''}${controls}</section>`;
+}
 function outputSettings(){
   const connected=APP.devices.filter(d=>d.available),disconnected=APP.devices.filter(d=>!d.available);
   const rows=devices=>devices.map(d=>`<section class="device-entry"><div class="device-row" data-device-row="${esc(d.id)}" tabindex="0" role="button" aria-expanded="${S.settingsDevice===d.id}" aria-label="${esc(d.name)}"><span class="device-title">${I('speaker')}<span><strong>${esc(d.name)}</strong><small>${d.channels?`${d.channels} channels · ${d.rate/1000} kHz`:'Device unavailable'}${d.id===APP.device?' · Open in editor':''}</small></span></span><span data-install-state="${esc(d.id)}"></span><span class="device-compat" data-compat="${esc(d.id)}"></span><button class="device-manage" data-manage-device="${esc(d.id)}">Manage</button></div><div class="device-detail" data-device-detail="${esc(d.id)}" ${S.settingsDevice===d.id?'':'hidden'}></div></section>`).join('');
-  return `<div class="settings-head"><div><h1>Outputs</h1><p>Choose where Contour processes audio.</p></div><button class="settings-button" data-act="refresh-devices">${I('refresh')}Refresh</button></div>${APP.masterIssues?.length?'<div class="settings-message"><strong>EQ change pending</strong><p>Some devices could not be updated. Check their connection and try again.</p><button class="settings-button" data-act="retry-master">Retry EQ change</button></div>':''}<div class="device-columns" aria-hidden="true"><span>Device</span><span>Contour</span><span>Compatibility</span><span></span></div><div class="device-list">${rows(connected)}</div>${disconnected.length?`<details class="disconnected-devices" ${S.showDisconnected?'open':''}><summary>Disconnected or disabled <span>${disconnected.length}</span></summary><div class="device-list">${rows(disconnected)}</div></details>`:''}`;
+  return `<div class="settings-head"><div><h1>Outputs</h1><p>Choose where Contour processes audio.</p></div><button class="settings-button" data-act="refresh-devices">${I('refresh')}Refresh</button></div><div id="engineUpdate"></div>${APP.masterIssues?.length?'<div class="settings-message"><strong>EQ change pending</strong><p>Some devices could not be updated. Check their connection and try again.</p><button class="settings-button" data-act="retry-master">Retry EQ change</button></div>':''}<div class="device-columns" aria-hidden="true"><span>Device</span><span>Contour</span><span>Compatibility</span><span></span></div><div class="device-list">${rows(connected)}</div>${disconnected.length?`<details class="disconnected-devices" ${S.showDisconnected?'open':''}><summary>Disconnected or disabled <span>${disconnected.length}</span></summary><div class="device-list">${rows(disconnected)}</div></details>`:''}`;
 }
 function deviceMessage(d,s){
-  if(pendingSetup?.endpoint===d.id)return 'Finishing the current device check before '+(pendingSetup.action==='Install'?'installation.':'removal.');
+  if(pendingSetup?.endpoint===d.id)return 'Finishing the current device check before '+({Install:'installation.',Remove:'removal.',Update:'the engine update.',RecoverUpdate:'engine recovery.'}[pendingSetup.action]);
+  if(s?.state==='updating')return 'Updating the audio engine for all installed devices. Your EQ will be kept.';
+  if(s?.state==='recovering')return 'Restoring the previous audio engine. Your EQ will be kept.';
+  if(s?.engineState==='recovery')return 'An engine update needs recovery. Restore the previous engine before making further changes.';
   if(s?.state==='installing')return 'Installing Contour on this device. Audio will return when installation finishes.';
   if(s?.state==='removing')return 'Uninstalling Contour from this device. Your profiles will be kept.';
   if(s?.busy)return 'Checking this device…';
@@ -103,7 +120,7 @@ function deviceDetails(d,s){
   const actions=confirm?`<div class="install-review"><h2>Uninstall Contour from this device?</h2><p>Your profiles will be kept. Windows will ask for administrator approval. Audio will briefly stop during removal.</p><div class="settings-actions"><button class="settings-button" data-setup-act="cancel">Cancel</button><button class="settings-button primary" data-setup-act="confirm" ${busy?'disabled':''}>Uninstall</button></div></div>`:`${canInstall?'<p class="settings-notice">Windows will ask for administrator approval. Audio will briefly stop during installation.</p>':''}${compatibility}<div class="settings-actions">${canInstall?`<button class="settings-button primary" data-setup-act="install" ${busy?'disabled':''}>Install</button>`:''}${installed&&d.available?'<button class="settings-button primary" data-setup-act="open-eq">Open EQ</button>':''}${s?.canRemove?'<button class="settings-button" data-setup-act="uninstall">Uninstall</button>':''}<button class="settings-button" data-setup-act="check" ${busy?'disabled':''}>Check again</button></div>`;
   const errors=(APP.masterIssues||[]).filter(x=>x.device===d.id).map(x=>x.detail);
   const runtime=d.id===APP.device?APP.status:null;
-  const diagnostics=[s?.detail,s?.notice,d.connection?.detail,...errors,runtime?.detail,runtime?.previewDetail,runtime?.copyDetail].filter(Boolean);
+  const diagnostics=[s?.detail,s?.notice,s?.engineDetail,s?.installedEngine?`Installed engine: ${s.installedEngine}`:'',d.connection?.detail,...errors,runtime?.detail,runtime?.previewDetail,runtime?.copyDetail].filter(Boolean);
   const controls=pendingSetup?.endpoint===d.id?'<div class="settings-actions"><button class="settings-button" data-setup-act="cancel-pending">Cancel</button></div>':setupOperation?.endpoint===d.id?'':!s?.busy||s.state==='checking'?actions:'';
   return `<p class="device-explanation" role="status">${esc(deviceMessage(d,s))}</p>${s?.notice?`<p class="settings-notice">${esc(s.notice)}</p>`:''}${controls}<details class="troubleshooting"><summary>Troubleshooting details</summary><p>${esc(d.name)}</p><p class="technical-id">${esc(d.id)}</p>${runtime?`<p>Saved EQ: ${esc(runtime.saved||'Not checked')}<br>Running EQ: ${esc(runtime.running||'Not checked')}</p>`:''}${diagnostics.map(x=>`<p>${esc(x)}</p>`).join('')}</details>`;
 }
@@ -111,6 +128,12 @@ function updateSettingsStatus(){
   const toggle=$('[data-act="eq"]');if(toggle)toggle.disabled=!!setupOperation;
   if(S.view!=='settings'||S.settingsTab!=='outputs')return;
   const refresh=$('[data-act="refresh-devices"]');if(refresh)refresh.disabled=!!setupOperation||inventoryRefreshing;
+  const engine=$('#engineUpdate'),engineHtml=engineUpdateView();
+  if(engine&&engine.dataset.markup!==engineHtml){
+    const focused=engine.contains(document.activeElement)?document.activeElement?.dataset.engineAct:null;
+    engine.innerHTML=engineHtml;engine.dataset.markup=engineHtml;
+    if(focused)engine.querySelector(`[data-engine-act="${focused}"]`)?.focus({preventScroll:true});
+  }
   APP.devices.forEach(d=>{
     const s=setupReports.get(d.id);
     const row=$$('[data-device-row]').find(el=>el.dataset.deviceRow===d.id);if(!row)return;
@@ -166,10 +189,18 @@ function acceptSetup(data){
   // Verification is still part of the operation the user started. Do not
   // briefly restore the device actions while the helper checks its result.
   if(!pendingSetup&&data.busy&&data.state==='checking'&&setupOperation?.endpoint===data.endpoint){
-    data={...data,state:setupOperation.action==='Install'?'installing':'removing'};
+    data={...data,state:setupProgress(setupOperation.action)};
   }
   SETUP=data;if(data.endpoint)setupReports.set(data.endpoint,data);
   if(!data.busy){
+    // Share the latest engine state, retaining an authorized endpoint for that
+    // same build if the latest device cannot manage it. A newer engine state
+    // must never resurrect an older per-device offer.
+    if(data.engineState){
+      const eligible=s=>s.engineState===data.engineState&&s.installedEngine===data.installedEngine&&s.availableEngine===data.availableEngine&&(s.canUpdate||s.canRecoverUpdate);
+      if(eligible(data))engineSetup=data;
+      else if(!engineSetup||!eligible(engineSetup)||engineSetup.endpoint===data.endpoint)engineSetup=[...setupReports.values()].find(s=>!s.busy&&eligible(s))||data;
+    }else if(data.endpoint===engineSetup?.endpoint||setupOperation?.endpoint===data.endpoint)engineSetup=null;
     const device=APP.devices.find(d=>d.id===data.endpoint);
     if(device&&!data.notice&&(data.state!=='blocked'||['another_device','preview_requirements'].includes(data.reason)))setupCache.set(device.id,{time:Date.now(),stamp:setupDeviceStamp(device)});
     else setupCache.delete(data.endpoint);
@@ -205,12 +236,20 @@ async function startSetup(action,endpoint){
     // Background inspection must leave text editing, pointer gestures and
     // unsaved input alone. Only an explicit install/remove flushes edits.
     if(action!=='Inspect'){document.activeElement?.blur();endGesture();await flush();}
-    SETUP={...setupReports.get(endpoint),endpoint,busy:true,state:action==='Inspect'?'checking':action==='Install'?'installing':'removing'};
+    SETUP={...setupReports.get(endpoint),endpoint,busy:true,state:setupProgress(action)};
     setupReports.set(endpoint,SETUP);updateEditorAvailability();updateSettingsStatus();
     const result=await rpc('setup',{action,endpoint});scanStarting=false;acceptSetup(result);
   }catch(error){scanStarting=false;if(action!=='Inspect')setupOperation=null;acceptSetup({...SETUP,busy:false,state:'blocked',notice:error.message,canInstall:false,canRemove:false});}
 }
 function openSetup(){return openSettings('outputs');}
+function engineAct(action){
+  if(action==='cancel'&&['Update','RecoverUpdate'].includes(pendingSetup?.action)){
+    pendingSetup=null;setupOperation=null;updateSettingsStatus();scanNext();return;
+  }
+  if(setupOperation||!engineSetup)return;
+  if(action==='update'&&engineSetup.canUpdate)setupRequest('Update',engineSetup.endpoint);
+  else if(action==='recover'&&engineSetup.canRecoverUpdate)setupRequest('RecoverUpdate',engineSetup.endpoint);
+}
 function setupAct(action){
   const d=setupDevice(),s=d&&setupReports.get(d.id);if(!d)return;
   if(action==='cancel-pending'&&pendingSetup?.endpoint===d.id){pendingSetup=null;setupOperation=null;updateSettingsStatus();scanNext();}
@@ -224,6 +263,7 @@ function setupAct(action){
 document.addEventListener('click',e=>{
   const tab=e.target.closest('[data-settings-tab]');if(tab){S.settingsTab=tab.dataset.settingsTab;render();if(S.settingsTab==='outputs')scanNext();return;}
   const theme=e.target.closest('[data-theme-choice]');if(theme){S.theme=theme.dataset.themeChoice;localStorage.setItem('theme',S.theme);render();syncWindowTheme();return;}
+  const engine=e.target.closest('[data-engine-act]');if(engine){engineAct(engine.dataset.engineAct);return;}
   const action=e.target.closest('[data-setup-act]');if(action){setupAct(action.dataset.setupAct);return;}
   const row=e.target.closest('[data-device-row]');if(row){
     S.settingsDevice=S.settingsDevice===row.dataset.deviceRow?null:row.dataset.deviceRow;S.setupConfirm=null;

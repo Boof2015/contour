@@ -25,9 +25,9 @@ function Save-SharedSetup($Record,[string]$Package) {
 function Get-SharedContext($Record,[string]$EndpointId) {
     @($Record.Contexts | Where-Object { $_.EndpointId -ieq $EndpointId }) | Select-Object -First 1
 }
-function Assert-SharedCatalog($Catalog,$Record) {
+function Assert-SharedCatalog($Catalog,$Record,[switch]$AllowRuntimeUpdate) {
     Assert-DeploymentState $Catalog
-    Assert-NoDeploymentHandoff $Catalog
+    Assert-NoDeploymentHandoff $Catalog -AllowRuntimeUpdate:$AllowRuntimeUpdate
     if (@($Catalog.Registrations).Count -ne 1 -or $Catalog.Registrations[0].Id -ine $Record.Id -or
         $Catalog.Registrations[0].Mode -ne 'Legacy') { throw 'Shared registration does not match the installation.' }
     foreach ($binding in $Catalog.Bindings) {
@@ -44,12 +44,9 @@ function Assert-SharedRegistration($Store,[string]$Package,$Registration) {
         $Registration.Packages[0].Sha256 -cne $attachment.Plan.DllSha256) { throw 'Unexpected shared registration.' }
     # Tests use an isolated registry and fixture DLL; the production host also
     # verifies the protected DLL hash before mutation and each engine check.
-    $fx=(Get-EndpointPath $attachment.Plan.Endpoint.Id)+'\FxProperties'
-    foreach ($change in $attachment.Plan.Changes) {
-        if ($change.Path -ine $fx -and -not (Test-RawEqual ($Store.Read($change.Path,$change.Name)) $change.After)) {
-            throw 'Shared APO registration changed. Other devices were left untouched.'
-        }
-    }
+    $catalog=Read-DeploymentState (Join-Path $Package 'endpoints.json')
+    Assert-NoRuntimeUpdate $catalog
+    Assert-RuntimeRegistration $Store $attachment.Plan (Get-RuntimeRecord $catalog $attachment.Plan).Active
 }
 function ConvertTo-SharedSetup($Store,[string]$Package,[string]$AdapterId,[scriptblock]$Checkpoint={param($Point)}) {
     $original=Read-SetupJson (Join-Path $Package 'device-setup.json')

@@ -74,6 +74,7 @@ public:
     ~Module() { FreeLibrary(handle_); }
     Module(const Module&) = delete;
     Module& operator=(const Module&) = delete;
+    HMODULE handle() const noexcept { return handle_; }
 
     ComPtr<IClassFactory> factory(REFCLSID id) const {
         ComPtr<IClassFactory> result;
@@ -291,9 +292,18 @@ void test_aggregation(const Module& module) {
             ComPtr<IClassFactory> unsupported;
             hr(apo.As(&unsupported), E_NOINTERFACE, "outer rejects unsupported interface");
             Instance instance(apo, false);
+            // A staged installation may contain any fallback profile. Exercise
+            // aggregation against explicit endpoint settings, not adjacent files.
+            const auto store = Microsoft::WRL::Make<control_test::Store>();
+            const auto persisted = Microsoft::WRL::Make<control_test::Store>();
+            contour::eq::write_saved_profile(*persisted.Get(),
+                {{{{"Aggregate test", {}, {}, default_db}}}, 48000, 2});
+            const auto endpoint = Microsoft::WRL::Make<control_test::Endpoint>(store.Get(), persisted.Get());
+            const auto devices = Microsoft::WRL::Make<control_test::Devices>(endpoint.Get());
             APOInitSystemEffects init{};
             init.APOInit.cbSize = sizeof(init);
             init.APOInit.clsid = id;
+            init.pDeviceCollection = devices.Get();
             hr(apo->Initialize(sizeof(init), reinterpret_cast<BYTE*>(&init)), S_OK, "aggregate initialize");
             auto media = format();
             Buffer input(16), output(16);
@@ -721,6 +731,11 @@ void test_control_bridge(const std::filesystem::path& path) {
         wait_for([&] { const auto s=status(); return s && s->state==PreviewState::ready; });
         EditSession editor(saved); LivePreview client(editor,store.Get());
         const auto initial_status=client.connect();
+        const auto origin=read_control_value(*store.Get(),engine_identity_key,max_engine_identity_bytes);
+        require(origin.has_value(),"APO did not identify its loaded engine");
+        const auto identity=decode_engine_identity(*origin);
+        wchar_t module_path[32768]{};require(GetModuleFileNameW(module.handle(),module_path,32768)>0,"Cannot read test module path");
+        require(identity.runtime==initial_status.runtime&&identity.module_path==module_path,"Engine evidence identifies the wrong module or runtime");
         require(initial_status.sample_rate==rate && initial_status.channels==2,"bridge did not report actual format");
         require(initial_status.evidence==RuntimeEvidence::loaded && initial_status.active_fingerprint==processing_fingerprint(saved.configuration,rate,2),"APO startup did not identify the loaded bank before audio callbacks");
         const auto output_is=[&](double left,double right) {
