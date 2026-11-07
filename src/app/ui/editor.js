@@ -93,7 +93,7 @@ const PATHS = {
   rack: '<rect x="1.8" y="4" width="12.4" height="8" rx="1.4"/><circle cx="5" cy="8" r="1"/><circle cx="8" cy="8" r="1"/><circle cx="11" cy="8" r="1"/>',
   chev: '<path d="M4.5 6.5 8 10l3.5-3.5"/>', plus: '<path d="M8 3.5v9M3.5 8h9"/>', check: '<path d="M3.5 8.5l3 3 6-7"/>',
   dots: '<circle cx="3.5" cy="8" r=".9" fill="currentColor"/><circle cx="8" cy="8" r=".9" fill="currentColor"/><circle cx="12.5" cy="8" r=".9" fill="currentColor"/>',
-  undo: '<path d="M5.5 4 2.5 7l3 3"/><path d="M2.8 7h6.7a4 4 0 0 1 0 8H7"/>', redo: '<path d="M10.5 4l3 3-3 3"/><path d="M13.2 7H6.5a4 4 0 0 0 0 8H9"/>',
+  undo: '<path d="M5.5 2.5 2.5 5.5l3 3"/><path d="M2.8 5.5h6.7a4 4 0 0 1 0 8H7"/>', redo: '<path d="M10.5 2.5l3 3-3 3"/><path d="M13.2 5.5H6.5a4 4 0 0 0 0 8H9"/>',
   copy: '<rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M3 10.5V3.8c0-.7.6-1.3 1.3-1.3h6.2"/>',
   trash: '<path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5"/>', x: '<path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/>',
   pen: '<path d="M10.5 3l2.5 2.5L6 12.5H3.5V10z"/>', export: '<path d="M8 10V2.5M5 5.5l3-3 3 3"/><path d="M2.5 11v2.5h11V11"/>', import: '<path d="M8 2.5v7.5M5 7l3 3 3-3"/><path d="M2.5 11v2.5h11V11"/>',
@@ -140,7 +140,7 @@ function bandsInner() {
   const n = l.filters.length;
   const body = n ? `<div class="rows" style="grid-template-rows:repeat(${Math.max(1, Math.ceil(n / 2))}, auto)">${l.filters.map(row).join('')}</div>`
     : `<div class="no-bands">No filters in this layer yet. Double-click the graph or use Add filter.</div>`;
-  return `<div class="bands-h"><span>Filters</span><span class="n">${n} of ${MAXF}</span><button class="add" id="addBand">${I('plus')}Add filter</button></div>${body}`;
+  return `<div class="bands-h"><span>Filters</span><span class="n">${n} of ${MAXF}</span><button class="add" id="addBand" ${n>=MAXF?'disabled title="This layer has the maximum of '+MAXF+' filters"':''}>${I('plus')}Add filter</button></div>${body}`;
 }
 function editorView() {
   const d = D(), ls = LAYERS(), l = L();

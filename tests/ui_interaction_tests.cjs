@@ -18,6 +18,7 @@ const fixture=()=>{
   let engineUpdate=new URL(location.href).searchParams.has('engine-update');
   if(engineUpdate)window.addEventListener('load',()=>openSettings('outputs'));
   if(new URL(location.href).searchParams.has('profiles'))window.addEventListener('load',()=>openProfiles());
+  if(new URL(location.href).searchParams.has('layer-menu'))window.addEventListener('load',()=>{S.pop='layermenu';renderOver();});
   if(new URL(location.href).searchParams.has('uninstalled')){
     installed.delete('test-output');state.editor=null;state.status={endpoint:'unavailable'};
     state.devices[0].name='Speakers (Steam Streaming Speakers)';
@@ -29,6 +30,7 @@ const fixture=()=>{
     if(r.op==='edit'){state.editor.work=r.work;state.editor.revision++;state.editor.dirty=true;window.testEdits.push(structuredClone(r.work));}
     if(r.op==='eq')state.eqEnabled=r.enabled;
     if(r.op==='profile_export')data=window.cancelExport?{cancelled:true}:{cancelled:false,filename:'Test profile.contour'};
+    if(r.op==='layer_export')data=window.cancelExport?{cancelled:true}:{cancelled:false,filename:'Filters.txt'};
     if(r.op==='profile_preview'){
       const profile=state.profiles.find(p=>p.id===r.id),layers=[
         {name:'Left',all:false,mask:1,gain:-8,on:true,filters:[{...filter(-10),freq:120,q:2},{...filter(3),freq:3600}]},
@@ -133,6 +135,28 @@ const checks=async()=>{
     const graph=$('#graph');graph.focus();key(graph,'Delete');await wait(60);assert(L().filters.length===1,'Delete on graph did not remove selected filter');
     $('.layers [data-layer]').focus();key(document.activeElement,'Delete');assert(L().filters.length===1,'Delete in layer pane removed a filter');
     results.push('Delete removes the selected filter without stealing text editing or layer-pane keys');
+
+    const layerBefore=structuredClone(L()),layerIndex=S.sel;
+    $('#layerMenuBtn').click();$('[data-act="rename-layer"]').click();
+    assert(document.activeElement===$('#lnIn')&&$('#lnIn').selectionEnd===L().name.length,'Rename did not focus and select the layer name');
+    $('#lnIn').value='Renamed layer';$('#lnIn').dispatchEvent(new Event('change',{bubbles:true}));await wait(60);
+    $('#layerMenuBtn').click();const exportBefore=window.testRequests.length;$('[data-act="export-layer"]').click();await wait(60);
+    const exportedLayer=window.testRequests.slice(exportBefore).find(r=>r.op==='layer_export');
+    assert(exportedLayer?.id===P().id&&exportedLayer.layer===S.sel&&exportedLayer.revision===P().revision,'Layer menu exported a stale or different layer');
+    assert(!window.testRequests.slice(exportBefore).some(r=>['save','select','edit','eq'].includes(r.op)),'Layer export changed the draft or EQ');
+    $('#addBand').click();await wait(50);assert(L().filters.at(-1).freq===500,'New band overlapped the existing 1 kHz band');
+    edit(()=>L().filters=Array.from({length:MAXF},()=>F('PK',1000,0,1)));await wait(50);
+    assert($('#addBand').disabled&&$('#addBand').title.includes('64'),'Full layer left Add filter looking available');
+    edit(()=>LAYERS()[layerIndex]=layerBefore);await wait(50);
+    results.push('Layer menu renames and exports the selected draft; new bands start apart; full layers disable Add filter');
+
+    const profilesBefore=APP.profiles;
+    APP.profiles=Array.from({length:50},(_,i)=>({...profilesBefore[0],id:'menu-'+i,name:'Profile '+i}));
+    $('#profileBtn').click();const menu=$('#pop'),menuRect=menu.getBoundingClientRect();
+    assert(menuRect.top>=0&&menuRect.bottom<=innerHeight&&menu.scrollHeight>menu.clientHeight,'Long profile menu escaped the window');
+    menu.querySelector('[data-act="profiles"]').focus();assert(menu.scrollTop>0,'Last menu action could not be reached by keyboard');
+    closePopover();APP.profiles=profilesBefore;
+    results.push('Long menus stay within the window and scroll to focused actions');
 
     const editCount=window.testEdits.length,workBefore=JSON.stringify(P().work),dirtyBefore=P().dirty;
     $('[data-act="eq"]').click();await wait(60);

@@ -174,6 +174,20 @@ async function main(){
   const toggle=await take('eq');assert.equal(toggle.enabled,true);reply(toggle);await turn();
   console.log('PASS close-to-tray flushes focused edits without Save/Quit; stale tray clicks rejected; layer/global toggles use the shared session');
 
+  // Export must capture the focused, unsaved edit after the native host has
+  // acknowledged it; Cancel must release the shared export guard.
+  context.document.activeElement={blur:()=>evaluate('P().work.layers[0].gain=-9.5; queueEdit();')};
+  evaluate('exportLayer();');
+  const exportEdit=await take('edit');assert.equal(exportEdit.work.layers[0].gain,-9.5);
+  state.editor.work=exportEdit.work;state.editor.revision++;reply(exportEdit);
+  const layerExport=await take('layer_export');
+  assert.equal(layerExport.id,state.editor.id);assert.equal(layerExport.layer,0);assert.equal(layerExport.revision,state.editor.revision);
+  evaluate('exportProfile(P().id);');await turn();assert.equal(posts.length,0,'Export opened a second picker');
+  reply(layerExport,{cancelled:true});await turn();assert.equal(evaluate('profileExportBusy'),false);
+  assert.equal(evaluate('P().work.layers[0].gain'),-9.5);assert.equal(posts.length,0,'Export saved or republished the draft');
+  context.document.activeElement={blur(){}};
+  console.log('PASS layer export flushes focused edits, uses the acknowledged revision, and Cancel releases the picker');
+
   // Sidebar actions on another layer keep the current layer selected.
   evaluate("edit=fn=>{fn();fixSel();};P().work.layers=[Ly('A',true,0,0,true,[]),Ly('B',true,0,0,true,[]),Ly('C',true,0,0,true,[])];S.sel=1;layerAction(0,'down');");
   assert.equal(evaluate('L().name'),'B');assert.equal(evaluate('S.sel'),0);

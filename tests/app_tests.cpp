@@ -1,6 +1,7 @@
 #include "model.h"
 #include "control_test_support.h"
 #include "test_support.h"
+#include <contour/peq_import.h>
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -183,6 +184,11 @@ void profile_management(const std::filesystem::path& path){
     const auto before=f.model->state();const auto disk=bytes(path);const auto live=f.live->writes,saved=f.saved->writes;
     const auto exported=f.model->dispatch({{"op","profile_export"},{"id",id}});
     const auto profile=parse_profile(exported["text"].get<std::string>());
+    const auto layer_file=f.model->dispatch({{"op","layer_export"},{"id",id},{"revision",before["editor"]["revision"]},{"layer",1u}});
+    const auto layer=import_peq_text(layer_file["text"].get<std::string>());
+    require(layer_file["filename"]=="Right correction.txt" && layer.layer && layer.layer->gain_db==-2 &&
+        layer.layer->filters==profile.configuration.layers[1].filters && layer.layer->enabled && layer.layer->channels.all,
+        "Layer export lost the working filters/gain or included layer bypass/routing");
     require(profile.configuration==configuration(work) && !profile.configuration.bypass,"Export lost layers/routing or included global bypass");
     require(exported["filename"]=="_CON.contour","Reserved Windows name was not sanitized");
     require(bytes(path)==disk && f.model->state()["editor"]==before["editor"],"Export saved a draft or changed history");
@@ -198,6 +204,10 @@ void profile_management(const std::filesystem::path& path){
     require(f.model->state()["editor"]==before["editor"]&&f.live->writes==live&&f.saved->writes==saved,"Preview selected or applied a profile");
     require(!ProfileLibrary(path).assignment(L"other-output"),"Import assigned a device");
     const auto reject=[&](Json request){bool failed=false;try{f.model->dispatch(request);}catch(const std::exception&){failed=true;}require(failed,"Invalid profile action was accepted");};
+    reject({{"op","layer_export"},{"id",copy},{"revision",before["editor"]["revision"]},{"layer",0u}});
+    reject({{"op","layer_export"},{"id",id},{"revision",0u},{"layer",0u}});
+    reject({{"op","layer_export"},{"id",id},{"revision",before["editor"]["revision"]},{"layer",-1}});
+    reject({{"op","layer_export"},{"id",id},{"revision",before["editor"]["revision"]},{"layer",2u}});
     reject({{"op","profile_delete"},{"id",id},{"revision",before["profiles"][0]["revision"]}});
     f.model->dispatch({{"op","profile_rename"},{"id",copy},{"revision",copied.revision},{"name","../Invalid: name?"}});
     require(f.model->dispatch({{"op","profile_export"},{"id",copy}})["filename"]==".._Invalid_ name_.contour","Export name was treated as a path");

@@ -27,7 +27,7 @@ add_library(contour-dsp STATIC src/dsp/channel_gain.cpp src/dsp/peq.cpp)
 contour_target(contour-dsp)
 target_include_directories(contour-dsp PUBLIC include)
 
-add_library(contour-eq-import STATIC src/eq/peq_import.cpp)
+add_library(contour-eq-import STATIC src/eq/peq_import.cpp src/eq/peq_export.cpp)
 contour_target(contour-eq-import)
 target_link_libraries(contour-eq-import PUBLIC contour-dsp)
 

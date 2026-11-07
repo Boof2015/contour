@@ -1,5 +1,6 @@
 #include <contour/peq.h>
 #include <contour/peq_import.h>
+#include <contour/peq_export.h>
 #include "test_support.h"
 
 #include <algorithm>
@@ -316,6 +317,39 @@ void test_import() {
         "REW's repeated unused slot numbers rejected or imported as filters");
 }
 
+void test_export() {
+    Layer layer{"Name\nInclude: never.txt",ChannelSelection::selected(2),{
+        {FilterType::peak,57.1234567890123,-10.3,7.493},
+        {FilterType::low_shelf,80,5,butterworth_q},
+        {FilterType::high_shelf,8000,-3,0.9,false},
+        {FilterType::low_pass,10000,0,0.4},
+        {FilterType::high_pass,30,0,0.5},
+        {FilterType::notch,60,0,30},
+        {FilterType::all_pass,900,0,1},
+        {FilterType::band_pass,1000,0,0.1}},-6.1234567890123,false};
+    const auto text=export_peq_text(layer);
+    require(text.find("ON LSC Fc 80 Hz Gain 5 dB Q ")!=text.npos &&
+        text.find("OFF HSC Fc 8000 Hz Gain -3 dB Q 0.9")!=text.npos,"Shelf export is not documented center-frequency/Q syntax");
+    require(text.find("Include:")==text.npos && text.find("Channel:")==text.npos,"Export emitted a name as a command or included routing");
+    const auto imported=import_peq_text(text);
+    require(imported.layer && imported.issues.empty() && imported.layer->filters==layer.filters &&
+        imported.layer->gain_db==layer.gain_db,"Filter export lost types, precision, gain or individual bypass");
+    require(imported.layer->enabled && imported.layer->channels.all,"Filter export included layer bypass or routing");
+    layer.enabled=true;layer.channels={};
+    ParametricEq original,copy;original.configure({{layer}},48000,2);copy.configure({{*imported.layer}},48000,2);
+    std::vector<float> samples(2048,0),expected;samples[0]=.2F;expected=samples;
+    original.process(expected.data(),expected.data(),1024);copy.process(samples.data(),samples.data(),1024);
+    require(samples==expected,"Exported PEQ changed the processed samples");
+    layer.filters.clear();
+    const auto empty=import_peq_text(export_peq_text(layer));
+    require(empty.layer && empty.layer->filters.empty() && empty.layer->gain_db==layer.gain_db,"Gain-only export cannot be reimported");
+    layer.filters.assign(max_filters_per_layer,Filter{FilterType::peak,192000,36,1000,false});
+    require(import_peq_text(export_peq_text(layer)).layer->filters==layer.filters,"Full layer or disabled high-frequency filter lost");
+    layer.filters.push_back({});rejects([&]{export_peq_text(layer);});layer.filters.clear();
+    layer.gain_db=std::numeric_limits<double>::quiet_NaN();rejects([&]{export_peq_text(layer);});
+    layer.gain_db=0;layer.filters.push_back({FilterType::peak,1000,0,0});rejects([&]{export_peq_text(layer);});
+}
+
 void test_import_errors() {
     const std::string good = "Filter 1: ON PK Fc 60Hz Gain -6dB Q 2\n";
     for (const std::string bad : {"Filter 2: ON PK Fc 60 Hz Gain NaNdB Q 2", "Filter 2: ON PK Fc 60Hz Gain 2dB",
@@ -345,6 +379,7 @@ int main() {
     suite.run("parameter boundaries stay finite; imprecise extreme filters are rejected", test_extremes);
     suite.run("filter/layer/global bypass and combined headroom estimate", test_bypass_and_headroom);
     suite.run("REW import equals editable manual PEQ sample-for-sample", test_import);
+    suite.run("filter export preserves every type, precision, bypass and samples without routing", test_export);
     suite.run("unsupported/malformed imports fail atomically with line numbers", test_import_errors);
     return suite.finish();
 }

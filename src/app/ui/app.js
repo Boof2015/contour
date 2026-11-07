@@ -221,13 +221,19 @@ async function openProfiles(){
   try{await flush();adopt(await rpc('state'));S.pop=null;S.view='library';render();}catch(error){toast(error.message);}
 }
 let profileExportBusy=false;
-async function exportProfile(id){
+async function exportDocument(op,args){
   if(profileExportBusy||setupOperation)return;
   profileExportBusy=true;S.pop=null;renderOver();document.activeElement?.blur();endGesture();
   $$('[data-profile-action="export"]').forEach(button=>button.disabled=true);
-  try{await flush();const result=await rpc('profile_export',{id});if(!result.cancelled)toast('Exported '+result.filename);}
+  try{await flush();const result=await rpc(op,args());if(!result.cancelled)toast('Exported '+result.filename);}
   catch(error){toast(error.message);}
   finally{profileExportBusy=false;$$('[data-profile-action="export"]').forEach(button=>button.disabled=false);}
+}
+function exportProfile(id){return exportDocument('profile_export',()=>({id}));}
+function exportLayer(){
+  if(!L())return;
+  const id=P().id,layer=S.sel;
+  return exportDocument('layer_export',()=>({id,layer,revision:P()?.revision}));
 }
 function profileAction(action,id){
   const p=APP.profiles.find(p=>p.id===id);if(!p||setupOperation)return;
@@ -283,7 +289,7 @@ function popHtml(){
   if(S.pop==='profiles')return '<div class="grp">Profiles</div>'+APP.profiles.map(p=>`<button class="mi" data-prof="${esc(p.id)}" ${p.channels!==D().channels?'disabled':''}><span class="ck">${p.id===P()?.id?I('check'):''}</span>${esc(p.name)}<span class="meta">${p.channels} ch</span></button>`).join('')+'<div class="divide"></div>'+mi('save','Save','save',!P()?.dirty)+mi('save-as','Save as new profile…')+mi('duplicate-profile','Duplicate profile','copy')+mi('rename-profile','Rename…','pen')+mi('export-profile','Export profile…','export')+mi('new-profile','New profile…','plus')+'<div class="divide"></div>'+mi('profiles','Manage profiles…','grid');
   if(S.pop==='channels')return channelPicker(D(),L());
   if(S.pop==='impch')return channelPicker(D(),S.modal);
-  if(S.pop==='layermenu')return mi('dup-layer','Duplicate','copy',LAYERS().length>=MAXL)+mi('import-into','Replace with imported filters…','import')+'<div class="divide"></div>'+mi('layer-up','Move up','up',S.sel===0)+mi('layer-down','Move down','down',S.sel===LAYERS().length-1)+'<div class="divide"></div>'+mi('del-layer','Delete layer','trash');
+  if(S.pop==='layermenu')return mi('rename-layer','Rename layer','pen')+mi('dup-layer','Duplicate layer','copy',LAYERS().length>=MAXL)+mi('import-into','Replace with imported filters…','import')+mi('export-layer','Export filters…','export',profileExportBusy)+'<div class="divide"></div>'+mi('layer-up','Move up','up',S.sel===0)+mi('layer-down','Move down','down',S.sel===LAYERS().length-1)+'<div class="divide"></div>'+mi('del-layer','Delete layer','trash');
   if(S.pop==='outch')return `<div class="grp">Combined filter channels</div><button class="mi" data-outmode="layer">This layer's channels</button><button class="mi" data-outmode="pick">Choose channels</button><div class="grid12">${Array.from({length:D().channels},(_,i)=>`<button class="spk${((S.outMask>>>i)&1)?' on':''}" data-outspk="${i}">${shortName(D(),i)}</button>`).join('')}</div>`;
   return '';
 }
@@ -460,7 +466,11 @@ document.addEventListener('click',async e=>{
   const om=t.closest('[data-outmode]');if(om){S.outMode=om.dataset.outmode;S.output=true;if(!S.outMask)S.outMask=fullMask(D())>>>0;render();return;}
   const os=t.closest('[data-outspk]');if(os){const mask=(S.outMask^(1<<+os.dataset.outspk))>>>0;if(mask){S.outMask=mask;S.outMode='pick';S.output=true;render();}return;}
   if(t.closest('#outToggle')){S.output=!S.output;render();return;}
-  if(t.closest('#addBand')){addBand(F('PK',1000,0,1));return;}
+  if(t.closest('#addBand')){
+    const used=L().filters.map(f=>f.freq);
+    const freq=[1000,500,2000,250,4000,125,8000].find(c=>c<NYQ&&!used.some(u=>Math.abs(Math.log2(u/c))<.3))||1000;
+    addBand(F('PK',freq,0,1));return;
+  }
   const del=t.closest('[data-del]');if(del){removeFilter(+del.dataset.del);return;}
   const lo=t.closest('[data-layeron]');if(lo){edit(()=>{const l=LAYERS()[+lo.dataset.layeron];l.on=!l.on;});return;}
   const bo=t.closest('[data-bandon]');if(bo){edit(()=>{const f=L().filters[+bo.dataset.bandon];f.on=!f.on;});return;}
@@ -490,6 +500,8 @@ document.addEventListener('click',async e=>{
     case 'eq':document.activeElement?.blur();endGesture();command('eq',{enabled:APP.eqEnabled===false},true);break;
     case 'add-layer':if(LAYERS().length<MAXL)edit(()=>{LAYERS().push(Ly('Layer '+(LAYERS().length+1),true,0,0,true,[]));S.sel=LAYERS().length-1;S.band=0;});break;
     case 'import':openImport('new');break;case 'import-into':openImport('replace');break;
+    case 'rename-layer':S.pop=null;renderOver();$('#lnIn')?.focus();$('#lnIn')?.select();break;
+    case 'export-layer':exportLayer();break;
     case 'dup-layer':S.pop=null;if(LAYERS().length<MAXL)edit(()=>{const l=clone(L());l.name+=' copy';LAYERS().splice(++S.sel,0,l);});break;
     case 'del-layer':layerAction(S.sel,'trash');break;
     case 'layer-up':case 'layer-down':layerAction(S.sel,act==='layer-up'?'up':'down');break;
