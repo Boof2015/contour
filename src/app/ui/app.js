@@ -101,7 +101,7 @@ function profileBox(){
     ${p.dirty?'<div class="dirty"><span>Unsaved changes</span><button class="lnk" data-act="revert">Revert</button><button class="sbtn" data-act="save">Save</button></div>':''}`;
 }
 function undoBox(){return P()&&!editorGate()?`<button class="ib" data-act="undo" title="Undo (Ctrl+Z)" aria-label="Undo" ${P().undo?'':'disabled'}>${I('undo')}</button><button class="ib" data-act="redo" title="Redo (Ctrl+Y)" aria-label="Redo" ${P().redo?'':'disabled'}>${I('redo')}</button>`:'';}
-function titlebar(){return `<div class="tb"><div class="brand">${MARK}contour</div>${S.view==='settings'?'<span class="settings-caption">Settings</span>':`<button class="chip" id="devBtn">${I('speaker')}<span class="device-name">${esc(D().name)}</span>${I('chev')}</button>`}<span class="grow"></span>${S.view==='editor'?`<span id="undoBox" style="display:flex;gap:2px">${undoBox()}</span><button class="ib" data-act="settings" title="Settings" aria-label="Settings">${I('settings')}</button>`:''}${S.view==='settings'||!editorGate()?`<span class="power">EQ<button class="sw${APP.eqEnabled===false?'':' on'}" data-act="eq" aria-label="Enable EQ globally" aria-pressed="${APP.eqEnabled!==false}" ${setupOperation?'disabled':''}></button></span>`:''}${windowButtons()}</div>`;}
+function titlebar(){return `<div class="tb"><div class="brand">${MARK}contour</div>${S.view==='settings'?'<span class="settings-caption">Settings</span>':`<button class="chip" id="devBtn">${I('speaker')}<span class="device-name">${esc(D().name)}</span>${I('chev')}</button>`}<span class="grow"></span>${S.view==='editor'?`<span id="undoBox" style="display:flex;gap:2px">${undoBox()}</span><button class="ib" data-act="profiles" title="Profiles" aria-label="Profiles">${I('grid')}</button><button class="ib" data-act="settings" title="Settings" aria-label="Settings">${I('settings')}</button>`:''}${S.view==='settings'||!editorGate()?`<span class="power">EQ<button class="sw${APP.eqEnabled===false?'':' on'}" data-act="eq" aria-label="Enable EQ globally" aria-pressed="${APP.eqEnabled!==false}" ${setupOperation?'disabled':''}></button></span>`:''}${windowButtons()}</div>`;}
 // Fast preview acknowledgements are diagnostics, not separate user-facing
 // connection states. Only a settled mismatch becomes a visible warning.
 let statusIssue='',statusIssueSince=0,statusIssueTimer=0;
@@ -137,6 +137,75 @@ function statusbar(){
   el.title=label;
 }
 function welcome(){return `<div class="body"><aside class="side"><div class="side-h">Profiles</div>${APP.profiles.filter(p=>p.channels===D().channels).map(p=>`<button class="mi" data-prof="${esc(p.id)}">${esc(p.name)}</button>`).join('')}<span class="grow"></span><button class="prim" data-act="new-profile">New profile</button></aside><main class="welcome"><h2>No profile selected</h2><p>Choose a profile or create one for ${esc(D().name)}.</p><button class="prim" data-act="new-profile">Create a profile</button></main></div>`;}
+const profilePreviews=new Map();
+let profilePreviewsLoading=false;
+function profilePreviewContent(p){
+  if(p.id===P()?.id)return profileCurvePreview(P().work,p.channels,P().curveRate||P().rate);
+  const cached=profilePreviews.get(p.id);
+  return cached?.revision===p.revision?cached.html:'';
+}
+async function loadProfilePreviews(){
+  if(profilePreviewsLoading||S.view!=='library')return;
+  for(const id of profilePreviews.keys())if(!APP.profiles.some(p=>p.id===id))profilePreviews.delete(id);
+  profilePreviewsLoading=true;
+  try{
+    while(S.view==='library'){
+      const p=APP.profiles.find(p=>p.id!==P()?.id&&profilePreviews.get(p.id)?.revision!==p.revision);
+      if(!p)break;
+      let html;
+      try{const data=await rpc('profile_preview',{id:p.id});rememberCurves(data.work,data.rate);html=profileCurvePreview(data.work,data.channels,data.rate);}
+      catch{html='<span>Preview unavailable</span>';}
+      profilePreviews.set(p.id,{revision:p.revision,html});
+      if(S.view==='library'&&p.id!==P()?.id){
+        const card=$$('[data-profile-card]').find(el=>el.dataset.profileCard===p.id);
+        if(card)card.querySelector('.profile-preview').innerHTML=html;
+      }
+    }
+  }finally{profilePreviewsLoading=false;}
+}
+function profileLibraryView(){
+  const cards=APP.profiles.map(p=>{
+    const used=p.usedBy||[],current=p.id===P()?.id,match=p.channels===D().channels;
+    const count=(n,label)=>`${n??0} ${label}${n===1?'':'s'}`;
+    const usage=used.length?'Used on '+used.map(d=>d.name+(d.available?'':' (disconnected)')).join(', '):'Not in use';
+    const button=(action,label,icon,disabled=false)=>`<button class="ib" data-profile-action="${action}" data-profile-id="${esc(p.id)}" title="${esc(label)}" aria-label="${esc(label)}" ${disabled?'disabled':''}>${I(icon)}</button>`;
+    return `<article class="card${current?' sel':''}" data-profile-card="${esc(p.id)}"><div class="top"><span class="nm">${esc(p.name)}</span>${current&&P().dirty?'<span class="dot" title="Unsaved changes"></span>':''}<span class="lay">${p.channels===2?'Stereo':p.channels+' channels'}</span></div><div class="meta"><span>${count(p.layers,'layer')}</span><span>${count(p.filters,'filter')}</span></div><div class="profile-preview">${profilePreviewContent(p)}</div><p class="profile-usage">${esc(usage)}</p>${!match?`<p class="warn">This profile has ${p.channels} channels. ${esc(D().name)} has ${D().channels}.</p>`:''}<div class="acts"><button class="use" data-prof="${esc(p.id)}" ${current||!match||editorGate()?'disabled':''}>${current?'In use here':match?'Use on this device':'Different layout'}</button>${button('duplicate','Duplicate '+p.name,'copy')}${button('rename','Rename '+p.name,'pen')}${button('export',current&&P().dirty?'Export current edits':'Export '+p.name,'export',profileExportBusy)}${button('delete',p.canDelete?'Delete '+p.name:'Select another profile on its devices before deleting','trash',!p.canDelete)}</div></article>`;
+  }).join('');
+  return `<div class="body"><main class="lib"><div class="lib-h"><button class="back" data-act="back-eq">${I('back')}Editor</button><h2>Profiles</h2><span class="n">${APP.profiles.length}</span><span class="grow"></span><button class="act" data-act="import-profile">${I('import')}Import profile…</button><button class="act" data-act="new-profile" ${editorGate()?'disabled':''}>${I('plus')}New profile</button><input id="profileFile" type="file" accept=".contour" hidden></div>${cards?`<div class="cards profiles-list">${cards}</div>`:'<div class="profile-empty"><h3>No profiles yet</h3><p>Create a profile or import a .contour file.</p></div>'}</main></div>`;
+}
+async function openProfiles(){
+  if(setupOperation||APP.closing?.state!=='open')return;
+  document.activeElement?.blur();endGesture();
+  try{await flush();adopt(await rpc('state'));S.pop=null;S.view='library';render();}catch(error){toast(error.message);}
+}
+let profileExportBusy=false;
+async function exportProfile(id){
+  if(profileExportBusy||setupOperation)return;
+  profileExportBusy=true;S.pop=null;renderOver();document.activeElement?.blur();endGesture();
+  $$('[data-profile-action="export"]').forEach(button=>button.disabled=true);
+  try{await flush();const result=await rpc('profile_export',{id});if(!result.cancelled)toast('Exported '+result.filename);}
+  catch(error){toast(error.message);}
+  finally{profileExportBusy=false;$$('[data-profile-action="export"]').forEach(button=>button.disabled=false);}
+}
+function profileAction(action,id){
+  const p=APP.profiles.find(p=>p.id===id);if(!p||setupOperation)return;
+  if(action==='export'){exportProfile(id);return;}
+  if(action==='delete'){
+    if(!p.canDelete)return;
+    dialog('Delete '+p.name+'?','This removes the profile and its layers. It can’t be undone.',[['cancel','Cancel'],['delete','Delete','danger']],undefined,{delete:async()=>{const result=await command('profile_delete',{id,revision:p.revision},true);if(result)toast('Deleted '+p.name);}});return;
+  }
+  const duplicate=action==='duplicate';if(!duplicate&&action!=='rename')return;
+  dialog(duplicate?'Duplicate profile':'Rename profile',duplicate&&p.id===P()?.id&&P().dirty?'The copy will include your current edits.':'',[['cancel','Cancel'],['go',duplicate?'Duplicate':'Save','go']],p.name+(duplicate?' copy':''),{go:async name=>{if(name)await command(duplicate?'profile_duplicate':'profile_rename',{id,name,revision:p.revision},true);}});
+}
+async function importProfileFile(file){
+  if(!file)return;
+  if(file.size>1024*1024){toast('The profile file must be smaller than 1 MB');return;}
+  try{
+    const content=await file.text(),name=file.name.replace(/\.contour$/i,'').trim()||'Imported profile';
+    const result=await command('profile_import',{name,text:content},true);
+    if(result)toast('Imported '+name+'. Choose Use on this device to apply it.');
+  }catch(error){toast(error.message);}
+}
 let renderedProfile='',renderedGate='';
 function editorAvailabilityKey(){
   const gate=editorGate(),s=setupReports.get(APP?.device);
@@ -157,18 +226,19 @@ function render(){
   }
   const key=APP.device+':'+P()?.id,keep=key===renderedProfile,layerScroll=keep?$('.layers')?.scrollTop||0:0,bandScroll=keep?$('#bands')?.scrollTop||0:0;
   renderedProfile=key;
-  $('#win').innerHTML='<div class="resize-top" data-resize="resize-top" aria-hidden="true"><i data-resize="resize-top-left"></i><i data-resize="resize-top-right"></i></div>'+titlebar()+(S.view==='settings'?settingsView():gate?installationView(gate):P()?editorView():welcome())+(S.view==='editor'&&gate?'':'<div class="statusbar" id="statusbar" aria-label="Output status"></div>');
+  $('#win').innerHTML='<div class="resize-top" data-resize="resize-top" aria-hidden="true"><i data-resize="resize-top-left"></i><i data-resize="resize-top-right"></i></div>'+titlebar()+(S.view==='settings'?settingsView():S.view==='library'?profileLibraryView():gate?installationView(gate):P()?editorView():welcome())+(S.view==='editor'&&gate?'':'<div class="statusbar" id="statusbar" aria-label="Output status"></div>');
   if($('.layers'))$('.layers').scrollTop=layerScroll;if($('#bands'))$('#bands').scrollTop=bandScroll;
   // Add keyboard semantics to switches inherited from the approved drawing.
   $$('.sw:not(button)').forEach(el=>{el.role='switch';el.tabIndex=0;el.setAttribute('aria-checked',el.classList.contains('on'));el.setAttribute('aria-label','Enable filter');});
   bindGraph();statusbar();renderOver();draw();updateSettingsStatus();
+  loadProfilePreviews();
   ensureEditorCheck();
 }
 function popHtml(){
   const mi=(act,label,icon='',disabled=false)=>`<button class="mi" data-act="${act}" ${disabled?'disabled':''}><span class="ck">${icon?I(icon):''}</span>${label}</button>`;
   if(S.pop==='filtertype')return `<div role="listbox" aria-label="Filter type">${TYPES.map(([id,name])=>`<button class="mi type-option" role="option" aria-selected="${L()?.filters[S.typeBand]?.type===id}" tabindex="${L()?.filters[S.typeBand]?.type===id?0:-1}" data-filter-type="${id}"><span class="ck">${L()?.filters[S.typeBand]?.type===id?I('check'):''}</span>${name}</button>`).join('')}</div>`;
   if(S.pop==='devices')return '<div class="grp">Windows outputs</div>'+APP.devices.filter(d=>d.available||d.id===APP.device).map(d=>`<button class="mi" data-device="${esc(d.id)}"><span class="ck">${d.id===APP.device?I('check'):''}</span><span class="two">${esc(d.name)}<small>${d.channels} channels · ${d.rate/1000} kHz</small></span></button>`).join('')+'<div class="divide"></div>'+mi('setup','Manage devices…','settings');
-  if(S.pop==='profiles')return '<div class="grp">Profiles</div>'+APP.profiles.map(p=>`<button class="mi" data-prof="${esc(p.id)}" ${p.channels!==D().channels?'disabled':''}><span class="ck">${p.id===P()?.id?I('check'):''}</span>${esc(p.name)}<span class="meta">${p.channels} ch</span></button>`).join('')+'<div class="divide"></div>'+mi('save','Save','save',!P()?.dirty)+mi('save-as','Save as new profile…')+mi('duplicate-profile','Duplicate profile','copy')+mi('rename-profile','Rename…','pen')+mi('new-profile','New profile…','plus');
+  if(S.pop==='profiles')return '<div class="grp">Profiles</div>'+APP.profiles.map(p=>`<button class="mi" data-prof="${esc(p.id)}" ${p.channels!==D().channels?'disabled':''}><span class="ck">${p.id===P()?.id?I('check'):''}</span>${esc(p.name)}<span class="meta">${p.channels} ch</span></button>`).join('')+'<div class="divide"></div>'+mi('save','Save','save',!P()?.dirty)+mi('save-as','Save as new profile…')+mi('duplicate-profile','Duplicate profile','copy')+mi('rename-profile','Rename…','pen')+mi('export-profile','Export profile…','export')+mi('new-profile','New profile…','plus')+'<div class="divide"></div>'+mi('profiles','Manage profiles…','grid');
   if(S.pop==='channels')return channelPicker(D(),L());
   if(S.pop==='impch')return channelPicker(D(),S.modal);
   if(S.pop==='layermenu')return mi('dup-layer','Duplicate','copy',LAYERS().length>=MAXL)+mi('import-into','Replace with imported filters…','import')+'<div class="divide"></div>'+mi('layer-up','Move up','up',S.sel===0)+mi('layer-down','Move down','down',S.sel===LAYERS().length-1)+'<div class="divide"></div>'+mi('del-layer','Delete layer','trash');
@@ -226,7 +296,7 @@ function toast(message){let el=$('#toast');if(!el){el=document.createElement('di
 async function switchProfile(id,choice){
   S.pop=null;await flush();const data=await command('select',{id,...(choice?{choice}:{})},true);
   if(data?.decision==='select')dialog('Save changes?',`Save your changes to ${P().name} before switching profiles?`,[['cancel','Cancel'],['discard',"Don't save"],['save','Save','go']],undefined,{save:()=>switchProfile(id,'save'),discard:()=>switchProfile(id,'discard')});
-  else{S.sel=0;S.band=0;render();}
+  else if(data&&P()?.id===id){S.view='editor';S.sel=0;S.band=0;render();}
 }
 let lastClose='open';
 function handleClose(){
@@ -337,6 +407,7 @@ document.addEventListener('click',async e=>{
   const a=t.closest('#devBtn,#profileBtn,#chBtn,#layerMenuBtn,#outBtn,#impChBtn');if(a){S.pop=S.pop===anchors[a.id]?null:anchors[a.id];renderOver();return;}
   if(S.pop&&!t.closest('#pop'))closePopover();
   const device=t.closest('[data-device]');if(device){S.pop=null;await command('device',{id:device.dataset.device},true);return;}
+  const profileActionButton=t.closest('[data-profile-action]');if(profileActionButton){if(!profileActionButton.disabled)profileAction(profileActionButton.dataset.profileAction,profileActionButton.dataset.profileId);return;}
   const pf=t.closest('[data-prof]');if(pf){switchProfile(pf.dataset.prof);return;}
   const target=S.pop==='impch'?S.modal:L(),ch=fn=>{if(S.pop==='impch'){fn(target);renderOver();}else edit(()=>fn(target));};
   const co=t.closest('[data-chopt]');if(co){ch(l=>{l.all=co.dataset.chopt==='all';l.mask=l.all?0:(1<<+co.dataset.chopt)>>>0;});return;}
@@ -354,9 +425,12 @@ document.addEventListener('click',async e=>{
   const layer=t.closest('[data-layer]');if(layer){S.sel=+layer.dataset.layer;S.band=0;render();return;}
   const band=t.closest('[data-band]');if(band&&!t.closest('.fld,button')){selectBand(+band.dataset.band);band.focus({preventScroll:true});return;}
   const act=t.closest('[data-act]')?.dataset.act;if(!act)return;
-  if(!['theme','status','setup','device-setup','settings','back-eq','refresh-devices','retry-master','eq','new-profile'].includes(act)&&!P())return;
+  if(!['theme','status','setup','device-setup','settings','back-eq','refresh-devices','retry-master','eq','new-profile','profiles','import-profile'].includes(act)&&!P())return;
   switch(act){
     case 'settings':case 'setup':openSetup();break;
+    case 'profiles':openProfiles();break;
+    case 'export-profile':exportProfile(P().id);break;
+    case 'import-profile':$('#profileFile')?.click();break;
     case 'device-setup':openSettings('outputs',APP.device);break;
     case 'back-eq':if(!setupOperation){S.view='editor';S.pop=null;S.setupConfirm=null;render();}break;
     case 'refresh-devices':refreshDevices(true);break;
@@ -384,7 +458,7 @@ document.addEventListener('click',async e=>{
     }
   }
 });
-document.addEventListener('change',e=>{if(e.target.id==='lnIn'){const value=e.target.value.trim();if(value)edit(()=>L().name=value);else e.target.value=L().name;}});
+document.addEventListener('change',e=>{if(e.target.id==='profileFile'){const file=e.target.files[0];e.target.value='';importProfileFile(file);return;}if(e.target.id==='lnIn'){const value=e.target.value.trim();if(value)edit(()=>L().name=value);else e.target.value=L().name;}});
 document.addEventListener('keydown',e=>{
   if(e.key==='Tab'&&S.modal){const items=$$('.dlg button:not(:disabled),.dlg input:not(:disabled):not([hidden]),.dlg textarea');const first=items[0],last=items.at(-1);if(e.shiftKey&&document.activeElement===first){e.preventDefault();last?.focus();}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first?.focus();}}
   if((e.key==='Enter'||e.key===' ')&&(e.target.matches('.sw:not(button)')||e.target.matches('[data-layer]'))){e.preventDefault();e.target.click();}

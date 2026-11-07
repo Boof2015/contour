@@ -28,6 +28,19 @@ std::optional<UnsavedChoice> choice(const Json& j) {
     if (s=="cancel") { return UnsavedChoice::cancel; }
     throw std::invalid_argument("Unknown unsaved-changes decision");
 }
+std::string export_filename(std::string_view name) {
+    auto value=wide(name);
+    for (auto& c:value) { if (c<32 || std::wstring_view(L"<>:\"/\\|?*").find(c)!=std::wstring_view::npos) { c=L'_'; } }
+    if (value.size()>160) { value.resize(160); if (value.back()>=0xd800 && value.back()<=0xdbff) { value.pop_back(); } }
+    while (!value.empty() && (value.back()==L'.' || value.back()==L' ')) { value.pop_back(); }
+    if (value.empty()) { value=L"Profile"; }
+    auto stem=value.substr(0,value.find(L'.'));
+    for (auto& c:stem) { if (c>=L'a' && c<=L'z') { c-=L'a'-L'A'; } }
+    const bool port=stem.size()==4 && (stem.starts_with(L"COM") || stem.starts_with(L"LPT")) &&
+        ((stem[3]>=L'0' && stem[3]<=L'9') || stem[3]==0xb9 || stem[3]==0xb2 || stem[3]==0xb3);
+    if (stem==L"CON" || stem==L"PRN" || stem==L"AUX" || stem==L"NUL" || port) { value.insert(value.begin(),L'_'); }
+    return utf8(value+L".contour");
+}
 const char* close_name(CloseState s) {
     constexpr std::array names{"open","needs_decision","waiting","ready","needs_attention","closed"};
     return names.at(static_cast<std::size_t>(s));
@@ -357,6 +370,38 @@ Json Model::dispatch(const Json& request) {
         next_device_=index; return close(request);
     }
     if (deferred_close_||session_->close_status().state!=CloseState::open) { throw std::runtime_error("Finish or cancel closing first"); }
+    if (op=="profile_preview") {
+        // Saved library thumbnails are requested on demand. The selected
+        // profile already has its working draft in the editor state.
+        const auto& entry=library_.get(text(request,"id"));
+        return {{"id",entry.id},{"revision",entry.revision},{"channels",entry.saved.channels},
+            {"rate",entry.saved.validation_sample_rate},{"work",configuration_json(entry.saved.configuration,entry.saved.validation_sample_rate)}};
+    }
+    if (op=="profile_export" || op=="profile_duplicate" || op=="profile_rename" || op=="profile_delete") {
+        const auto id=text(request,"id"); const auto entry=library_.get(id);
+        const auto current=session_->current(); const bool selected=current && current->id()==id;
+        if (op=="profile_export" || op=="profile_duplicate") {
+            auto profile=selected ? current->editor()->working() : entry.saved;
+            profile.configuration.bypass=false; // Global app preference is never exported/copied.
+            if (op=="profile_export") { return {{"name",entry.name},{"filename",export_filename(entry.name)},{"text",serialize_profile(profile)}}; }
+            const auto created=library_.create(text(request,"name"),std::move(profile));
+            auto result=state(); result["createdProfileId"]=created.id; return result;
+        }
+        if (!request.at("revision").is_number_unsigned() || request.at("revision").get<std::uint64_t>()!=entry.revision) {
+            throw LibraryConflict("Profile changed; review it before trying again");
+        }
+        if (op=="profile_delete") {
+            if (selected) { throw std::invalid_argument("Select another profile before deleting this one"); }
+            library_.erase(id,entry.revision);
+        } else if (selected) { session_->rename(text(request,"name")); }
+        else { library_.rename(id,entry.revision,text(request,"name")); }
+        return state();
+    }
+    if (op=="profile_import") {
+        auto profile=parse_profile(text(request,"text",1024*1024)); profile.configuration.bypass=false;
+        const auto created=library_.create(text(request,"name"),std::move(profile));
+        auto result=state(); result["createdProfileId"]=created.id; return result;
+    }
     if (op=="eq") { set_eq_enabled(request.at("enabled").get<bool>()); }
     else if (op=="edit") { if (editor().replace(configuration(request.at("work")))) { preview(); } }
     else if (op=="begin") { editor().begin_edit(); }
@@ -402,7 +447,19 @@ Json Model::state(bool include_document) {
     }
     result["eqEnabled"]=eq_enabled_; result["masterIssues"]=master_issues_;
     result["profiles"]=Json::array();
-    for (const auto& p:library_.entries()) { result["profiles"].push_back({{"id",p.id},{"name",p.name},{"channels",p.saved.channels}}); }
+    for (const auto& p:library_.entries()) {
+        Json used=Json::array();
+        for (const auto& a:library_.assignments()) {
+            if (a.profile_id!=p.id) { continue; }
+            const auto* device=find_device(a.endpoint_id);
+            used.push_back({{"id",utf8(a.endpoint_id)},{"name",device?device->name:"Disconnected device"},{"available",device && device->available}});
+        }
+        const auto current=session_->current(); const bool selected=current && current->id()==p.id;
+        const auto& profile=selected ? current->editor()->working() : p.saved;
+        std::size_t filters=0; for (const auto& layer:profile.configuration.layers) { filters+=layer.filters.size(); }
+        result["profiles"].push_back({{"id",p.id},{"name",p.name},{"channels",p.saved.channels},{"revision",p.revision},
+            {"layers",profile.configuration.layers.size()},{"filters",filters},{"usedBy",used},{"canDelete",used.empty() && !selected}});
+    }
     const auto& close_state=session_->close_status();
     result["closing"]={{"state",close_name(close_state.state)},{"detail",close_state.detail},{"switching",next_device_.has_value()}};
     if(deferred_close_)result["closing"]={{"state",GetTickCount64()-deferred_close_started_<3500?"waiting":"needs_attention"},

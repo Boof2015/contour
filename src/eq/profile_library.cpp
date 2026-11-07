@@ -180,6 +180,15 @@ ProfileEntry ProfileLibrary::create(std::string name,Profile saved) {
     auto entry=prepare_create(std::move(name),std::move(saved)); insert(entry); return entry;
 }
 ProfileEntry ProfileLibrary::duplicate_saved(std::string_view id,std::string name) { return create(std::move(name),get(id).saved); }
+void ProfileLibrary::erase(std::string_view id,std::uint64_t expected_revision) {
+    if (get(id).revision!=expected_revision) { throw LibraryConflict("Profile changed since deletion was requested"); }
+    if (std::any_of(assignments_.begin(),assignments_.end(),[&](const auto& a){return a.profile_id==id;})) {
+        throw std::invalid_argument("This profile is in use. Select another profile on its devices before deleting it");
+    }
+    auto entries=entries_;
+    std::erase_if(entries,[&](const auto& entry){return entry.id==id;});
+    commit(std::move(entries));
+}
 ProfileEntry ProfileLibrary::update(std::string_view id,std::uint64_t expected_revision,const Profile& saved) {
     auto entry=get(id); if (entry.revision!=expected_revision) { throw LibraryConflict("Profile changed since this draft was opened"); }
     validate_profile(saved); entry.saved=saved; entry.revision=next_revision(entry.revision);

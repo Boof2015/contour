@@ -245,6 +245,35 @@ void legacy_migration(const std::filesystem::path& directory) {
     }
     require(read(path)==disk,"Invalid endpoint identity changed the library");
 }
+void deletion(const std::filesystem::path& directory) {
+    const auto path=directory/L"delete.library";
+    ProfileLibrary library(path);
+    const auto active=library.create("Used",profile(-3));
+    auto unused=library.create("Unused",profile(-8));
+    const auto raced=library.create("Concurrent assignment",profile(-9));
+    ProfileWorkspace selected(library,L"connected"),disconnected(library,L"disconnected");
+    selected.select(active.id);disconnected.select(active.id);
+    const auto original=read(path);const auto assignments=library.assignments();
+    fails([&] { library.erase(active.id,active.revision); });
+    require(read(path)==original && library.assignments()==assignments,"Delete removed a profile still used by devices");
+    unused=library.rename(unused.id,unused.revision,"Renamed unused");
+    const auto before=read(path);
+    fails([&] { library.erase(unused.id,unused.revision-1); });
+    { FileLock lock(path);fails([&] { library.erase(unused.id,unused.revision); }); }
+    require(read(path)==before && library.get(unused.id)==unused,"Stale or failed delete changed the library");
+    library.erase(unused.id,unused.revision);
+    ProfileLibrary reopened(path);
+    require(reopened.entries().size()==2 && reopened.assignments()==assignments,"Delete changed assignments or failed to persist");
+    fails([&] { reopened.get(unused.id); });
+    ProfileWorkspace newer(reopened,L"new-device");newer.select(raced.id);
+    const auto concurrent=read(path);
+    fails([&] { library.erase(raced.id,raced.revision); });
+    require(read(path)==concurrent && library.get(raced.id)==raced,"Delete overwrote another writer's new assignment");
+    library.reload();fails([&] { library.erase(raced.id,raced.revision); });
+    require(selected.current()->id()==active.id && disconnected.current()->id()==active.id,"Deleting unused data changed open device sessions");
+    ProfileLibrary empty(directory/L"delete-last.library");const auto last=empty.create("Last",profile(-2));
+    empty.erase(last.id,last.revision);require(ProfileLibrary(directory/L"delete-last.library").entries().empty(),"Last unused profile could not be deleted");
+}
 void corrupt_assignments(const std::filesystem::path& directory) {
     const auto path=directory/L"bad-assignment.library";
     ProfileLibrary library(path); const auto a=library.create("A",profile(-3)); ProfileWorkspace workspace(library,L"endpoint-A"); workspace.select(a.id);
@@ -285,5 +314,6 @@ int wmain(int argc,wchar_t* argv[]) {
     suite.run("stale assigned/unassigned sessions, external writers, and stale selected profile detection",[&] { assignment_conflicts(directory); });
     suite.run("read-only v1 opening, atomic lazy v2 migration, invalid endpoint identities",[&] { legacy_migration(directory); });
     suite.run("dangling/duplicate/invalid assignments fail closed without partial load or writes",[&] { corrupt_assignments(directory); });
+    suite.run("unused deletion persists; assigned/offline/stale profiles and concurrent assignments are protected",[&] { deletion(directory); });
     const auto result=suite.finish(); CoUninitialize(); return result;
 }

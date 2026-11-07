@@ -402,6 +402,19 @@ ul { margin: 0; padding: 0; list-style: none; }
 .card .acts .use { height: 30px; padding: 0 12px; border-radius: 9px; background: var(--hi); color: var(--hi-ink); font-weight: 800; font-size: 12.5px; margin-right: auto; }
 .card .acts .use:disabled { background: var(--ctl-h); color: var(--text-3); }
 .card .acts .ib .ico { width: 15px; height: 15px; }
+.profiles-list .card { cursor:default; }
+.profiles-list .nm { min-width:0; overflow-wrap:anywhere; }
+.profiles-list .lay { flex-shrink:0; }
+.profile-preview { height:68px; flex:none; color:var(--text-3); font-size:11px; display:grid; place-items:center; }
+.profile-preview svg { display:block; width:100%; height:100%; overflow:hidden; }
+.profile-preview path { fill:none; vector-effect:non-scaling-stroke; }
+.profile-zero { stroke:var(--text-3); stroke-width:1; opacity:.22; }
+.profile-curve { stroke:var(--text); stroke-width:1.35; stroke-linejoin:round; }
+.profile-usage { margin:0 0 8px; color:var(--text-2); font-size:12px; line-height:1.6; overflow-wrap:anywhere; }
+.profiles-list .acts { margin-top:auto; }
+.profile-empty { padding:48px 24px; text-align:center; color:var(--text-2); }
+.profile-empty h3 { color:var(--text); }
+.df button.danger { background:var(--red); color:#fff; }
 
 /* Desktop integration: the operating system owns the window frame. */
 @font-face { font-family: Manrope; src: url('fonts/Manrope.ttf') format('truetype'); font-weight: 200 800; font-display: swap; }

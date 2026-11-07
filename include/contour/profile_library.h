@@ -46,6 +46,9 @@ public:
     ProfileEntry duplicate_saved(std::string_view id,std::string name);
     ProfileEntry update(std::string_view id,std::uint64_t expected_revision,const Profile& saved);
     ProfileEntry rename(std::string_view id,std::uint64_t expected_revision,std::string name);
+    // Deletion never unassigns a device or changes its saved/running EQ.
+    // Assigned profiles (including disconnected devices) must be replaced first.
+    void erase(std::string_view id,std::uint64_t expected_revision);
 private:
     friend class ProfileWorkspace;
     ProfileEntry prepare_create(std::string name,Profile saved) const;

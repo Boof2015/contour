@@ -172,6 +172,45 @@ void master_eq(const std::filesystem::path& path){
     f.publish_status();f.model->poll();f.consume();f.output_is(0);
     require(f.model->state()["status"]["applied"].get<bool>(),"Resumed bypass was not acknowledged");
 }
+void profile_management(const std::filesystem::path& path){
+    Fixture f(path);const auto id=f.model->state()["editor"]["id"];
+    auto work=f.work();work["layers"][0]["gain"]=-7;work["layers"][0]["name"]="Left correction";
+    work["layers"][0]["filters"]=Json::array({{{"type","PK"},{"freq",125},{"gain",-6},{"q",2},{"on",true}}});
+    work["layers"][0]["all"]=false;work["layers"][0]["mask"]=1;
+    auto right=work["layers"][0];right["name"]="Right correction";right["mask"]=2;right["gain"]=-2;right["on"]=false;work["layers"].push_back(right);
+    f.edit(work);f.consume();f.model->dispatch({{"op","eq"},{"enabled",false}});f.consume();
+    f.model->dispatch({{"op","rename"},{"name","CON"}});
+    const auto before=f.model->state();const auto disk=bytes(path);const auto live=f.live->writes,saved=f.saved->writes;
+    const auto exported=f.model->dispatch({{"op","profile_export"},{"id",id}});
+    const auto profile=parse_profile(exported["text"].get<std::string>());
+    require(profile.configuration==configuration(work) && !profile.configuration.bypass,"Export lost layers/routing or included global bypass");
+    require(exported["filename"]=="_CON.contour","Reserved Windows name was not sanitized");
+    require(bytes(path)==disk && f.model->state()["editor"]==before["editor"],"Export saved a draft or changed history");
+    const auto output=path.parent_path()/L"roundtrip.contour";save_profile_file(output,profile);
+    const auto imported=f.model->dispatch({{"op","profile_import"},{"name","Round trip"},{"text",*read_profile_file(output)}});
+    const auto copy=imported["createdProfileId"];
+    require(imported["editor"]==before["editor"] && imported["eqEnabled"]==false,"Import changed active EQ or draft");
+    require(f.model->dispatch({{"op","profile_export"},{"id",copy}})["text"]==exported["text"],"Profile file did not round-trip exactly");
+    const auto copied=ProfileLibrary(path).get(copy.get<std::string>());
+    const auto thumbnail=f.model->dispatch({{"op","profile_preview"},{"id",copy}});
+    require(thumbnail["id"]==copy&&thumbnail["revision"]==copied.revision&&thumbnail["channels"]==2&&thumbnail["rate"]==48000,"Preview lost the saved profile identity/format");
+    require(configuration(thumbnail["work"])==copied.saved.configuration&&!thumbnail["work"]["layers"][0]["filters"][0]["coefficients"].is_null(),"Preview omitted saved layers or native coefficients");
+    require(f.model->state()["editor"]==before["editor"]&&f.live->writes==live&&f.saved->writes==saved,"Preview selected or applied a profile");
+    require(!ProfileLibrary(path).assignment(L"other-output"),"Import assigned a device");
+    const auto reject=[&](Json request){bool failed=false;try{f.model->dispatch(request);}catch(const std::exception&){failed=true;}require(failed,"Invalid profile action was accepted");};
+    reject({{"op","profile_delete"},{"id",id},{"revision",before["profiles"][0]["revision"]}});
+    f.model->dispatch({{"op","profile_rename"},{"id",copy},{"revision",copied.revision},{"name","../Invalid: name?"}});
+    require(f.model->dispatch({{"op","profile_export"},{"id",copy}})["filename"]==".._Invalid_ name_.contour","Export name was treated as a path");
+    const auto unchanged=bytes(path);
+    reject({{"op","profile_delete"},{"id",copy},{"revision",copied.revision}});
+    reject({{"op","profile_import"},{"name","Invalid"},{"text",exported["text"].get<std::string>()+"Include: anything\n"}});
+    require(bytes(path)==unchanged,"Rejected management operation partly changed storage");
+    auto deleted=f.model->dispatch({{"op","profile_delete"},{"id",copy},{"revision",copied.revision+1}});
+    require(deleted["profiles"].size()==1 && deleted["editor"]==before["editor"],"Delete changed the selected draft");
+    require(f.live->writes==live && f.saved->writes==saved,"Profile management published audio or persisted device settings");
+    const auto active=deleted["profiles"][0];
+    require(!active["canDelete"].get<bool>() && active["usedBy"][0]["id"]==utf8(endpoint_id),"Assigned usage was omitted from the library UI");
+}
 void idle_edits(const std::filesystem::path& path){
     Fixture f(path);f.idle();
     auto work=f.work();work["layers"][0]["gain"]=-3;f.edit(work);
@@ -287,6 +326,7 @@ int wmain(int argc,wchar_t** argv){
     suite.run("native REW import, independent channels, native graph coefficients and audio",[&]{import_and_curves(dir/L"import.library");});
     suite.run("offline editing, durable partial Save and guarded exit",[&]{offline_and_exit(dir/L"offline.library");});
     suite.run("profile switch decisions, duplicate and strict bridge allowlist",[&]{profile_guard(dir/L"profiles.library");});
+    suite.run("profile export/import round trip, independent global EQ, deletion guards and no device writes",[&]{profile_management(dir/L"management.library");});
     suite.run("global EQ bypass preserves profiles/history and survives selection, save, restart and audio idle",[&]{master_eq(dir/L"master.library");});
     suite.run("idle edits coalesce, Save persists without playback, and close delivers automatically on resume",[&]{idle_edits(dir/L"idle.library");});
     suite.run("global EQ reaches assigned and unassigned outputs, preserves drafts and reports retryable partial failure",[&]{master_devices(dir/L"master-devices.library");});

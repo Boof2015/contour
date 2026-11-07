@@ -33,4 +33,26 @@ near(evaluate('output([left,right],0,sample)[0]'),9);
 evaluate('left.gain=-80;');near(evaluate('output([left,right],0,sample)[0]'),9);
 evaluate('left.on=false;');near(evaluate('output([left,right],0,sample)[0]'),0);
 evaluate('APP.eqEnabled=false;');near(evaluate('output([left,right],1,sample)[0]'),-3);
+// Library thumbnails can show saved profiles at different rates without
+// changing the open editor's frequency grid or using its cached coefficients.
+evaluate(`
+  left.on=true;
+  const editorRate=FS,editorSpan=LSPAN;
+  const thumb=profileCurvePreview({layers:[left,right]},2,96000);
+  const same=profileCurvePreview({layers:[Ly('All',true,0,-80,true,[f])]},8,96000);
+  const quiet=profileCurvePreview({layers:[Ly('Off',true,0,0,false,[f])]},2,44100);
+`);
+assert.equal(evaluate('FS===editorRate&&LSPAN===editorSpan'),true);
+assert.equal(evaluate('(thumb.match(/class="profile-curve"/g)||[]).length'),2);
+assert.equal(evaluate('(same.match(/class="profile-curve"/g)||[]).length'),1);
+assert.equal(evaluate('(quiet.match(/class="profile-curve"/g)||[]).length'),1);
+assert.equal(evaluate('quiet.includes("NaN")||thumb.includes("NaN")'),false);
+evaluate(`const otherGrid=grid(192,96000),otherResponse=resp(right.filters,otherGrid);`);
+const thumbResponse=Array.from(evaluate('otherResponse'));
+evaluate('FS=96000;LSPAN=Math.log10(20000)-LMIN;');
+const referenceResponse=Array.from(evaluate('resp(right.filters,grid(192))'));
+thumbResponse.forEach((value,i)=>near(value,referenceResponse[i]));
+evaluate('FS=editorRate;LSPAN=editorSpan;');
+assert.equal(evaluate('profileCurvePreview({layers:[left,right]},2,96000)===thumb'),true);
 console.log(`PASS ${checked} native/JS coefficient cases; synchronous edited curves; gain-independent channel sums, layer bypass and visible curves while global EQ is off`);
+console.log('PASS multichannel profile thumbnails, identical-response merging, disabled layers, and independent sample rates');

@@ -382,22 +382,23 @@ function designCurve(f,rate){
   const section=[b0,b1,b2,a1,a2].map(v=>v/a0);
   return section.every(Number.isFinite)?[section]:[];
 }
-function curveCoefficients(f){
-  const key=curveKey(f,FS),cached=curveCache.get(f);
+function curveCoefficients(f,rate=FS){
+  const key=curveKey(f,rate),cached=curveCache.get(f);
   if(cached?.key===key)return cached.sections;
-  const sections=designCurve(f,FS);curveCache.set(f,{key,sections});return sections;
+  const sections=designCurve(f,rate);curveCache.set(f,{key,sections});return sections;
 }
-function grid(n) {
-  n=Math.max(2,n); const key=FS+':'+LSPAN+':'+n;
+function grid(n,rate=FS) {
+  const span=Math.log10(Math.min(20000,rate/2-1))-LMIN;
+  n=Math.max(2,n); const key=rate+':'+span+':'+n;
   if(grids.has(key)){const g=grids.get(key);grids.delete(key);grids.set(key,g);return g;}
-  const g={n,f:[],c1:[],s1:[],c2:[],s2:[]};
-  for(let i=0;i<n;i++){ const f=10**(LMIN+LSPAN*i/(n-1)),w=2*Math.PI*f/FS;g.f.push(f);g.c1.push(Math.cos(w));g.s1.push(Math.sin(w));g.c2.push(Math.cos(2*w));g.s2.push(Math.sin(2*w)); }
+  const g={n,rate,f:[],c1:[],s1:[],c2:[],s2:[]};
+  for(let i=0;i<n;i++){ const f=10**(LMIN+span*i/(n-1)),w=2*Math.PI*f/rate;g.f.push(f);g.c1.push(Math.cos(w));g.s1.push(Math.sin(w));g.c2.push(Math.cos(2*w));g.s2.push(Math.sin(2*w)); }
   // A resize can visit hundreds of widths; do not retain a grid for each one.
   if(grids.size>=8)grids.delete(grids.keys().next().value);
   grids.set(key,g);return g;
 }
 function add(o,f,g) {
-  for(const [b0,b1,b2,a1,a2] of curveCoefficients(f)) for(let i=0;i<g.n;i++) {
+  for(const [b0,b1,b2,a1,a2] of curveCoefficients(f,g.rate)) for(let i=0;i<g.n;i++) {
     const nr=b0+b1*g.c1[i]+b2*g.c2[i],ni=-(b1*g.s1[i]+b2*g.s2[i]),dr=1+a1*g.c1[i]+a2*g.c2[i],di=-(a1*g.s1[i]+a2*g.s2[i]);
     o[i]+=10*Math.log10(Math.max(1e-30,(nr*nr+ni*ni)/(dr*dr+di*di)));
   }
@@ -405,3 +406,16 @@ function add(o,f,g) {
 const resp=(fs,g)=>{const o=new Float64Array(g.n);fs.forEach(f=>f.on&&add(o,f,g));return o;};
 const one=(f,g)=>{const o=new Float64Array(g.n);add(o,f,g);return o;};
 function output(layers,c,g){const o=new Float64Array(g.n);layers.forEach(l=>{if(l.on&&targets(l,c)){const r=resp(l.filters,g);for(let i=0;i<g.n;i++)o[i]+=r[i];}});return o;}
+
+function profileCurvePreview(work,channels,rate){
+  const g=grid(192,rate),paths=new Set();
+  const layers=work.layers.filter(l=>l.on).map(layer=>({layer,response:resp(layer.filters,g)}));
+  for(let c=0;c<channels;c++){
+    const response=new Float64Array(g.n);
+    for(const {layer,response:r} of layers)if(targets(layer,c))for(let i=0;i<g.n;i++)response[i]+=r[i];
+    // Identical visible responses share a line, including flat channels.
+    paths.add(pathOf(response,g,300,68,24));
+  }
+  const opacity=Math.max(.24,.8/Math.sqrt(paths.size)).toFixed(2);
+  return `<svg viewBox="0 0 300 68" preserveAspectRatio="none" role="img" aria-label="Combined filter response${paths.size>1?'s':''}; layer gain excluded"><path class="profile-zero" d="M0 34H300"/>${[...paths].map(d=>`<path class="profile-curve" d="${d}" opacity="${opacity}"/>`).join('')}</svg>`;
+}

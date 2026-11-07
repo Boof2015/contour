@@ -3,6 +3,7 @@
 #include <WebView2.h>
 #include <wrl.h>
 #include <shlobj.h>
+#include <shobjidl.h>
 #include <shellapi.h>
 #include <dwmapi.h>
 #include <windowsx.h>
@@ -15,7 +16,7 @@ using Microsoft::WRL::ComPtr;
 using Microsoft::WRL::Callback;
 using contour::app::Json;
 constexpr auto page=L"https://contour.invalid/index.html";
-constexpr UINT start_frame_drag=WM_APP+1,open_system_menu=WM_APP+2;
+constexpr UINT start_frame_drag=WM_APP+1,open_system_menu=WM_APP+2,show_export_dialog=WM_APP+3;
 struct App {
     HWND window=nullptr;
     std::unique_ptr<contour::app::Model> model;
@@ -28,6 +29,37 @@ struct App {
     ULONGLONG caption_click=0; POINT caption_point{};
     Json sent_window_state;
     COLORREF background_color=RGB(22,22,24);
+    struct ExportJob { Json request_id; contour::eq::Profile profile; std::wstring filename; };
+    std::optional<ExportJob> export_job;
+    void export_profile() noexcept {
+        if (!export_job) { return; }
+        const auto request_id=export_job->request_id;
+        try {
+            const auto check=[](HRESULT hr) { if (FAILED(hr)) { throw std::runtime_error("Could not open the profile export dialog"); } };
+            ComPtr<IFileSaveDialog> dialog;
+            check(CoCreateInstance(CLSID_FileSaveDialog,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&dialog)));
+            FILEOPENDIALOGOPTIONS options{};check(dialog->GetOptions(&options));
+            check(dialog->SetOptions(options|FOS_FORCEFILESYSTEM|FOS_OVERWRITEPROMPT|FOS_STRICTFILETYPES|FOS_NOCHANGEDIR));
+            const COMDLG_FILTERSPEC type{L"Contour profile (*.contour)",L"*.contour"};
+            check(dialog->SetFileTypes(1,&type));check(dialog->SetDefaultExtension(L"contour"));
+            check(dialog->SetTitle(L"Export profile"));check(dialog->SetOkButtonLabel(L"Export"));
+            check(dialog->SetFileName(export_job->filename.c_str()));
+            const auto result=dialog->Show(window);
+            if (result==HRESULT_FROM_WIN32(ERROR_CANCELLED)) {
+                send({{"requestId",request_id},{"ok",true},{"data",{{"cancelled",true}}}});
+            } else {
+                check(result);ComPtr<IShellItem> item;check(dialog->GetResult(&item));
+                PWSTR raw=nullptr;check(item->GetDisplayName(SIGDN_FILESYSPATH,&raw));
+                const std::unique_ptr<wchar_t,decltype(&CoTaskMemFree)> path_owner(raw,CoTaskMemFree);
+                const std::filesystem::path path(raw);
+                contour::eq::save_profile_file(path,export_job->profile);
+                send({{"requestId",request_id},{"ok",true},{"data",{{"cancelled",false},{"filename",contour::app::utf8(path.filename().wstring())}}}});
+            }
+        } catch (const std::exception& e) {
+            try { send({{"requestId",request_id},{"ok",false},{"error",e.what()}}); } catch (...) {}
+        }
+        export_job.reset();
+    }
     void apply_background() {
         ComPtr<ICoreWebView2Controller2> background;
         if (controller && SUCCEEDED(controller.As(&background))) {
@@ -64,6 +96,9 @@ struct App {
             if (body.size()>2*1024*1024) { throw std::invalid_argument("Editor message is too large"); }
             const auto request=Json::parse(contour::app::utf8(body)); request_id=request.at("requestId");
             if (!request_id.is_number_unsigned()) { throw std::invalid_argument("Invalid request identity"); }
+            if (export_job && request.at("op")!="state" && request.at("op")!="inspect") {
+                throw std::runtime_error("Finish or cancel the profile export first");
+            }
             if (request.at("op")=="window") {
                 const auto action=request.at("action").get<std::string>();
                 if (action=="minimize") { ShowWindow(window,SW_MINIMIZE); }
@@ -117,6 +152,16 @@ struct App {
             }
             if (setup->mutating() && request.at("op")!="state" && request.at("op")!="inspect") {
                 throw std::runtime_error("Wait for installation or removal to finish");
+            }
+            if (request.at("op")=="profile_export") {
+                const auto document=model->dispatch(request);
+                export_job=ExportJob{request_id,contour::eq::parse_profile(document.at("text").get<std::string>()),contour::app::wide(document.at("filename").get<std::string>())};
+                // A native modal loop must start after the WebView callback
+                // returns. Capture the reviewed draft before opening the picker.
+                if (!PostMessageW(window,show_export_dialog,0,0)) {
+                    export_job.reset();throw std::runtime_error("Could not start profile export");
+                }
+                return;
             }
             auto result=model->dispatch(request); ready=true;
             send({{"requestId",request_id},{"ok",true},{"data",std::move(result)}});
@@ -230,6 +275,7 @@ LRESULT CALLBACK window_proc(HWND window,UINT message,WPARAM w,LPARAM l) {
         if (command) { PostMessageW(window,WM_SYSCOMMAND,static_cast<WPARAM>(command),0); }
         return 0;
     }
+    case show_export_dialog: app->export_profile(); return 0;
     case WM_SIZE: app->resize(); if (app->ready) { app->send_window_state(); } return 0;
     case WM_MOVE: if (app->controller) { app->controller->NotifyParentWindowPositionChanged(); } break;
     case WM_GETMINMAXINFO: {
@@ -255,6 +301,7 @@ LRESULT CALLBACK window_proc(HWND window,UINT message,WPARAM w,LPARAM l) {
         }
         return 0;
     case WM_CLOSE:
+        if (app->export_job) { return 0; }
         if (app->setup->mutating()) { app->fail("Wait for installation or removal to finish before closing Contour."); return 0; }
         if (app->ready) { app->send({{"event","close"}}); }
         else {

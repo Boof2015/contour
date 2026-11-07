@@ -9,12 +9,15 @@ const profile=fs.mkdtempSync(path.join(work,'browser-'));
 const fixture=()=>{
   const filter=(gain=0)=>({type:'PK',on:true,freq:1000,gain,q:1});
   const state={device:'test-output',devices:[{id:'test-output',name:'Offline test output',channels:2,rate:48000,mask:3,available:false}],profiles:[],closing:{state:'open'},status:{endpoint:'ready',applied:true,running:'processed_match',saved:'matches',copy:'current'},editor:{id:'test-profile',name:'Test profile',channels:2,rate:48000,curveRate:48000,revision:1,dirty:false,undo:false,redo:false,work:{bypass:false,layers:['A','B','C'].map(name=>({name,all:true,mask:0,gain:0,on:true,filters:[filter()]}))}}};
-  state.profiles=[{id:'test-profile',name:'Test profile',channels:2}];
+  state.profiles=[{id:'test-profile',name:'Test profile',channels:2,revision:1,layers:3,filters:3,canDelete:false,usedBy:[{id:'test-output',name:'Offline test output',available:true}]},
+    {id:'test-unused',name:'Unused <profile>',channels:2,revision:7,layers:2,filters:5,canDelete:true,usedBy:[]},
+    {id:'test-assigned',name:'Surround profile',channels:6,revision:1,layers:1,filters:4,canDelete:false,usedBy:[{id:'test-disconnected',name:'Disconnected test device',available:false}]}];
   state.eqEnabled=true;state.masterIssues=[];state.devices[0].available=true;
   state.devices.push({id:'test-second',name:'Second test device',channels:2,rate:48000,mask:3,available:true},{id:'test-disconnected',name:'Disconnected test device',channels:0,rate:0,mask:0,available:false,state:8});
   const installed=new Set(['test-output']);
   let engineUpdate=new URL(location.href).searchParams.has('engine-update');
   if(engineUpdate)window.addEventListener('load',()=>openSettings('outputs'));
+  if(new URL(location.href).searchParams.has('profiles'))window.addEventListener('load',()=>openProfiles());
   if(new URL(location.href).searchParams.has('uninstalled')){
     installed.delete('test-output');state.editor=null;state.status={endpoint:'unavailable'};
     state.devices[0].name='Speakers (Steam Streaming Speakers)';
@@ -25,6 +28,17 @@ const fixture=()=>{
     if(r.op==='window')data={custom:false,maximized:false};
     if(r.op==='edit'){state.editor.work=r.work;state.editor.revision++;state.editor.dirty=true;window.testEdits.push(structuredClone(r.work));}
     if(r.op==='eq')state.eqEnabled=r.enabled;
+    if(r.op==='profile_export')data=window.cancelExport?{cancelled:true}:{cancelled:false,filename:'Test profile.contour'};
+    if(r.op==='profile_preview'){
+      const profile=state.profiles.find(p=>p.id===r.id),layers=[
+        {name:'Left',all:false,mask:1,gain:-8,on:true,filters:[{...filter(-10),freq:120,q:2},{...filter(3),freq:3600}]},
+        {name:'Right',all:false,mask:2,gain:-5,on:true,filters:[{...filter(-7),freq:190,q:2},{...filter(2),freq:2200}]},
+        {name:'All',all:true,mask:0,gain:-4,on:true,filters:[{...filter(4),type:'LSQ',freq:90}]}];
+      for(const l of layers)for(const f of l.filters)f.coefficients=designCurve(f,44100);
+      data={id:r.id,revision:profile.revision,channels:profile.channels,rate:44100,work:{layers}};
+    }
+    if(r.op==='profile_delete')state.profiles=state.profiles.filter(p=>p.id!==r.id);
+    if(r.op==='profile_import'){state.profiles.push({id:'test-imported',name:r.name,channels:2,revision:1,layers:0,filters:0,canDelete:true,usedBy:[]});data={...state,createdProfileId:'test-imported'};}
     if(r.op==='setup'){
       if(r.action==='Install')installed.add(r.endpoint);
       if(r.action==='Remove')installed.delete(r.endpoint);
@@ -161,6 +175,34 @@ const checks=async()=>{
     $('[data-settings-tab="general"]').click();$('[data-theme-choice="light"]').click();assert(document.documentElement.dataset.theme==='light','General appearance preference failed');
     $('[data-act="back-eq"]').click();await wait(60);assert($('#graph')&&APP.eqEnabled===false&&JSON.stringify(P().work)===workBefore,'Returning from Settings lost the editor or master state');
     results.push('Global EQ is independent of profiles; single Install; uninstall review clears on start and progress stays stable through verification');
+
+    $('[data-act="profiles"]').click();await wait(50);
+    assert(S.view==='library'&&$$('[data-profile-card]').length===3&&!$('#graph'),'Profile library did not open');
+    assert($$('.profile-preview svg').length===3,'Profile previews did not load');
+    assert($('[data-profile-card="test-unused"] .profile-preview').querySelectorAll('.profile-curve').length===2,'Independent channel previews were lost');
+    const previewRequests=window.testRequests.filter(r=>r.op==='profile_preview').length;
+    render();await wait(30);
+    assert(window.testRequests.filter(r=>r.op==='profile_preview').length===previewRequests,'Unchanged thumbnails were fetched again');
+    const activeCard=$('[data-profile-card="test-profile"]'),unusedCard=$('[data-profile-card="test-unused"]'),assignedCard=$('[data-profile-card="test-assigned"]');
+    assert(activeCard.querySelector('[data-profile-action="delete"]').disabled&&assignedCard.querySelector('[data-profile-action="delete"]').disabled,'Assigned or disconnected profiles can be deleted');
+    assert(assignedCard.textContent.includes('(disconnected)')&&unusedCard.textContent.includes('Unused <profile>'),'Usage or escaped profile names missing');
+    const managementBefore=window.testRequests.length;
+    activeCard.querySelector('[data-profile-action="export"]').click();await wait(40);
+    assert(window.testRequests.slice(managementBefore).some(r=>r.op==='profile_export'&&r.id==='test-profile'),'Export did not target the chosen profile');
+    assert(!window.testRequests.slice(managementBefore).some(r=>['save','select','edit','eq'].includes(r.op))&&JSON.stringify(P().work)===workBefore,'Export saved, switched or altered the draft');
+    const toastBefore=$('#toast').textContent;window.cancelExport=true;
+    activeCard.querySelector('[data-profile-action="export"]').click();await wait(40);
+    assert($('#toast').textContent===toastBefore&&!profileExportBusy,'Cancelled export claimed success or left the editor blocked');window.cancelExport=false;
+    unusedCard.querySelector('[data-profile-action="delete"]').click();
+    assert($('.dlg').textContent.includes('Delete Unused <profile>?'),'Delete did not identify the chosen profile');
+    $('[data-mb="cancel"]').click();assert(APP.profiles.some(p=>p.id==='test-unused'),'Cancel deleted a profile');
+    unusedCard.querySelector('[data-profile-action="delete"]').click();$('[data-mb="delete"]').click();await wait(40);
+    const deletion=window.testRequests.find(r=>r.op==='profile_delete');
+    assert(deletion?.id==='test-unused'&&deletion.revision===7&&!$('[data-profile-card="test-unused"]'),'Confirmed deletion lost identity/revision or remained visible');
+    await importProfileFile(new File(['CONTOUR 1 48000 2\nBypass 0\nEnd\n'],'Imported EQ.contour',{type:'text/plain'}));await wait(40);
+    assert($('[data-profile-card="test-imported"]')&&APP.device===deviceBefore&&P().id===profileBefore&&JSON.stringify(P().work)===workBefore,'Import selected itself or lost the current draft');
+    $('[data-act="back-eq"]').click();await wait(40);
+    results.push('Profile library shows device usage, guards assigned deletion, confirms exact unused revision, exports without saving, cancels cleanly, and imports without applying');
 
     await openSettings('outputs');await wait(40);
     const engineOffer={canUpdate:true,engineState:'update_available',engineDevices:['Offline test output','Second test device']};
