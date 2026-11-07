@@ -1,5 +1,6 @@
 #include "model.h"
 #include "setup.h"
+#include "tray.h"
 #include <WebView2.h>
 #include <wrl.h>
 #include <shlobj.h>
@@ -16,11 +17,13 @@ using Microsoft::WRL::ComPtr;
 using Microsoft::WRL::Callback;
 using contour::app::Json;
 constexpr auto page=L"https://contour.invalid/index.html";
-constexpr UINT start_frame_drag=WM_APP+1,open_system_menu=WM_APP+2,show_export_dialog=WM_APP+3;
+constexpr UINT start_frame_drag=WM_APP+1,open_system_menu=WM_APP+2,show_export_dialog=WM_APP+3,quit_application=WM_APP+4;
 struct App {
     HWND window=nullptr;
     std::unique_ptr<contour::app::Model> model;
     std::unique_ptr<contour::app::DeviceSetup> setup;
+    std::unique_ptr<contour::app::TrayHost> tray;
+    UINT activate_message=0;
     ComPtr<ICoreWebView2Controller> controller;
     ComPtr<ICoreWebView2> view;
     std::filesystem::path assets,data;
@@ -31,6 +34,18 @@ struct App {
     COLORREF background_color=RGB(22,22,24);
     struct ExportJob { Json request_id; contour::eq::Profile profile; std::wstring filename; };
     std::optional<ExportJob> export_job;
+    void show_editor() {
+        if(tray)tray->hide();
+        if(controller)controller->put_IsVisible(TRUE);
+        ShowWindow(window,IsIconic(window)?SW_RESTORE:SW_SHOW);SetForegroundWindow(window);
+    }
+    void tray_action(const Json& request) {
+        const auto action=request.at("action").get<std::string>();
+        if(action=="open-editor"){show_editor();return;}
+        if(action=="quit"){PostMessageW(window,quit_application,0,0);return;}
+        if(!ready||export_job){show_editor();return;}
+        send({{"event","tray"},{"data",request}});
+    }
     void export_profile() noexcept {
         if (!export_job) { return; }
         const auto request_id=export_job->request_id;
@@ -66,7 +81,7 @@ struct App {
             background->put_DefaultBackgroundColor({255,GetRValue(background_color),GetGValue(background_color),GetBValue(background_color)});
         }
     }
-    Json window_state() const { return {{"custom",custom_frame},{"maximized",IsZoomed(window)!=FALSE}}; }
+    Json window_state() const { return {{"custom",custom_frame},{"maximized",IsZoomed(window)!=FALSE},{"tray",tray&&tray->installed()}}; }
     void send_window_state(bool force=false) {
         const auto state=window_state();
         if (force || state!=sent_window_state) { sent_window_state=state; send({{"event","window"},{"data",state}}); }
@@ -104,6 +119,17 @@ struct App {
                 if (action=="minimize") { ShowWindow(window,SW_MINIMIZE); }
                 else if (action=="maximize") { ShowWindow(window,IsZoomed(window) ? SW_RESTORE : SW_MAXIMIZE); }
                 else if (action=="close") { PostMessageW(window,WM_CLOSE,0,0); }
+                else if (action=="show") { show_editor(); }
+                else if (action=="hide") {
+                    if(tray&&tray->installed()) { tray->hide();ShowWindow(window,SW_HIDE);controller->put_IsVisible(FALSE); }
+                }
+                else if (action=="tray-state"||action=="tray-open") {
+                    if(tray){
+                        const auto& state=request.at("data");
+                        if(state.value("attention",false)){show_editor();}
+                        else {tray->update(state);if(action=="tray-open")tray->show();}
+                    }
+                }
                 else if (action=="theme") {
                     const auto theme=request.at("theme").get<std::string>();
                     if (theme!="dark" && theme!="light") { throw std::invalid_argument("Unknown theme"); }
@@ -176,10 +202,13 @@ struct App {
         const auto hr=CreateCoreWebView2EnvironmentWithOptions(nullptr,cache.c_str(),nullptr,
             Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>([this](HRESULT result,ICoreWebView2Environment* environment)->HRESULT {
                 if (FAILED(result) || !environment) { fail("The Microsoft Edge WebView2 Runtime could not start."); return S_OK; }
+                const ComPtr<ICoreWebView2Environment> shared_environment=environment;
                 return environment->CreateCoreWebView2Controller(window,
-                    Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>([this](HRESULT created,ICoreWebView2Controller* control)->HRESULT {
+                    Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>([this,shared_environment](HRESULT created,ICoreWebView2Controller* control)->HRESULT {
                         if (FAILED(created) || !control) { fail("Contour could not create its editor window."); return S_OK; }
                         controller=control; controller->get_CoreWebView2(&view); resize();
+                        tray=std::make_unique<contour::app::TrayHost>(window,assets,[this](const Json& request){tray_action(request);});
+                        tray->initialize(shared_environment.Get());
                         apply_background();
                         ComPtr<ICoreWebView2Settings> settings; view->get_Settings(&settings);
                         settings->put_AreDefaultContextMenusEnabled(FALSE); settings->put_AreDevToolsEnabled(FALSE);
@@ -206,7 +235,7 @@ struct App {
                         view->add_PermissionRequested(Callback<ICoreWebView2PermissionRequestedEventHandler>([](ICoreWebView2*,ICoreWebView2PermissionRequestedEventArgs* e)->HRESULT { e->put_State(COREWEBVIEW2_PERMISSION_STATE_DENY); return S_OK; }).Get(),&token);
                         view->add_WebMessageReceived(Callback<ICoreWebView2WebMessageReceivedEventHandler>([this](ICoreWebView2*,ICoreWebView2WebMessageReceivedEventArgs* e)->HRESULT { message(e); return S_OK; }).Get(),&token);
                         view->add_ProcessFailed(Callback<ICoreWebView2ProcessFailedEventHandler>([this](ICoreWebView2*,ICoreWebView2ProcessFailedEventArgs*)->HRESULT {
-                            ready=false; fail("The editor display stopped. Your draft remains in memory. Close the window to choose whether to save it."); return S_OK;
+                            ready=false; show_editor();fail("The editor display stopped. Your draft remains in memory. Close the window to choose whether to save it."); return S_OK;
                         }).Get(),&token);
                         return view->Navigate(page);
                     }).Get());
@@ -221,6 +250,8 @@ LRESULT CALLBACK window_proc(HWND window,UINT message,WPARAM w,LPARAM l) {
         SetWindowLongPtrW(window,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(app));
     }
     if (!app) { return DefWindowProcW(window,message,w,l); }
+    if(app->activate_message&&message==app->activate_message){app->show_editor();return 0;}
+    if(app->tray&&app->tray->handle(message,w,l))return 0;
     switch (message) {
     case WM_ERASEBKGND: {
         // WS_CLIPCHILDREN excludes the WebView. Only uncovered host pixels are
@@ -301,7 +332,13 @@ LRESULT CALLBACK window_proc(HWND window,UINT message,WPARAM w,LPARAM l) {
         }
         return 0;
     case WM_CLOSE:
+        if(app->ready&&app->tray&&app->tray->installed()&&app->model->close_to_tray()&&!app->export_job&&!app->setup->mutating()){
+            app->send({{"event","hide"}});return 0;
+        }
+        [[fallthrough]];
+    case quit_application:
         if (app->export_job) { return 0; }
+        app->show_editor();
         if (app->setup->mutating()) { app->fail("Wait for installation or removal to finish before closing Contour."); return 0; }
         if (app->ready) { app->send({{"event","close"}}); }
         else {
@@ -321,6 +358,7 @@ LRESULT CALLBACK window_proc(HWND window,UINT message,WPARAM w,LPARAM l) {
         }
         return 0;
     case WM_DESTROY:
+        app->tray.reset();
         KillTimer(window,1); if (app->controller) { app->controller->Close(); }
         PostQuitMessage(0); return 0;
     }
@@ -344,6 +382,19 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int show) {
         else if (count!=1) { LocalFree(args); throw std::invalid_argument("Usage: contour.exe [--data-dir directory]"); }
         LocalFree(args);
         std::filesystem::create_directories(app.data);
+        // One editor/session per data directory. Reopening the executable
+        // restores the existing window, including a draft hidden in the tray.
+        auto identity=std::filesystem::weakly_canonical(app.data).wstring();
+        CharLowerBuffW(identity.data(),static_cast<DWORD>(identity.size()));
+        std::uint64_t hash=14695981039346656037ULL;
+        for(const auto c:identity){hash^=static_cast<std::uint16_t>(c);hash*=1099511628211ULL;}
+        const auto name=L"Contour.Instance."+std::to_wstring(hash);
+        app.activate_message=RegisterWindowMessageW(name.c_str());
+        const auto mutex=CreateMutexW(nullptr,FALSE,(L"Local\\"+name).c_str());
+        const auto mutex_error=GetLastError();
+        const std::unique_ptr<void,decltype(&CloseHandle)> instance_lock(mutex,CloseHandle);
+        if(!mutex)throw std::runtime_error("Cannot open the Contour instance lock");
+        if(mutex_error==ERROR_ALREADY_EXISTS){PostMessageW(HWND_BROADCAST,app.activate_message,0,0);CoUninitialize();return 0;}
         app.model=std::make_unique<contour::app::Model>(app.data/L"profiles.contour-library",contour::app::enumerate_devices());
         WNDCLASSW cls{}; cls.lpfnWndProc=window_proc; cls.hInstance=instance; cls.lpszClassName=L"ContourEditor";
         cls.hCursor=LoadCursorW(nullptr,IDC_ARROW); cls.hbrBackground=static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));

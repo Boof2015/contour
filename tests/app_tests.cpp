@@ -211,6 +211,19 @@ void profile_management(const std::filesystem::path& path){
     const auto active=deleted["profiles"][0];
     require(!active["canDelete"].get<bool>() && active["usedBy"][0]["id"]==utf8(endpoint_id),"Assigned usage was omitted from the library UI");
 }
+void tray_preferences(const std::filesystem::path& path){
+    Fixture f(path);require(f.model->close_to_tray(),"Tray should be the default close behavior");
+    auto work=f.work();work["layers"][0]["gain"]=-4;f.edit(work);f.consume();
+    const auto before=f.model->state()["editor"];const auto live=f.live->writes,saved=f.saved->writes;const auto disk=bytes(path);
+    const auto state=f.model->dispatch({{"op","preferences"},{"closeToTray",false}});
+    require(state["closeToTray"]==false&&!f.model->close_to_tray(),"Close preference did not update");
+    require(state["editor"]==before&&bytes(path)==disk&&f.live->writes==live&&f.saved->writes==saved,"Close preference changed the draft or device EQ");
+    f.model->dispatch({{"op","eq"},{"enabled",false}});f.consume();
+    f.model.reset();f.model=std::make_unique<Model>(path,std::vector<Device>{{endpoint_id,"Fixture output",2,48000,3,true}},f.enumerator.Get());
+    require(!f.model->close_to_tray()&&f.model->state()["eqEnabled"]==false,"EQ toggle overwrote tray preference or restart lost it");
+    f.model->dispatch({{"op","preferences"},{"closeToTray",true}});
+    require(f.model->state()["eqEnabled"]==false,"Tray preference re-enabled global EQ");
+}
 void idle_edits(const std::filesystem::path& path){
     Fixture f(path);f.idle();
     auto work=f.work();work["layers"][0]["gain"]=-3;f.edit(work);
@@ -327,6 +340,7 @@ int wmain(int argc,wchar_t** argv){
     suite.run("offline editing, durable partial Save and guarded exit",[&]{offline_and_exit(dir/L"offline.library");});
     suite.run("profile switch decisions, duplicate and strict bridge allowlist",[&]{profile_guard(dir/L"profiles.library");});
     suite.run("profile export/import round trip, independent global EQ, deletion guards and no device writes",[&]{profile_management(dir/L"management.library");});
+    suite.run("tray preference is durable and independent of profile, draft and global EQ",[&]{tray_preferences(dir/L"tray.library");});
     suite.run("global EQ bypass preserves profiles/history and survives selection, save, restart and audio idle",[&]{master_eq(dir/L"master.library");});
     suite.run("idle edits coalesce, Save persists without playback, and close delivers automatically on resume",[&]{idle_edits(dir/L"idle.library");});
     suite.run("global EQ reaches assigned and unassigned outputs, preserves drafts and reports retryable partial failure",[&]{master_devices(dir/L"master-devices.library");});

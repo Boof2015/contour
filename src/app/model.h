@@ -32,6 +32,7 @@ public:
     Json state(bool include_document=true);
     void poll();
     bool closed() const noexcept;
+    bool close_to_tray() const noexcept { return close_to_tray_; }
     const Device& selected_device() const noexcept { return devices_[device_]; }
     const Device* find_device(std::wstring_view id) const noexcept;
     void refresh_devices();
@@ -56,6 +57,7 @@ private:
     std::uint64_t last_inspect_=0;
     std::filesystem::path settings_path_;
     bool eq_enabled_=true;
+    bool close_to_tray_=true;
     Json master_issues_=Json::array();
     std::unique_ptr<AudioConnection> connection_;
     bool connections_suspended_=false;

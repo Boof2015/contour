@@ -21,12 +21,12 @@ target_link_libraries(contour-app-setup PUBLIC contour-app-model shell32 user32)
 add_executable(contour-endpoint-check "${PROJECT_SOURCE_DIR}/tools/deployment/endpoint_check.cpp")
 contour_target(contour-endpoint-check)
 target_link_libraries(contour-endpoint-check PRIVATE contour-app-setup)
-add_executable(contour WIN32 main.cpp)
+add_executable(contour WIN32 main.cpp tray.cpp)
 contour_target(contour)
 target_include_directories(contour SYSTEM PRIVATE "${webview2_SOURCE_DIR}/build/native/include")
 target_link_libraries(contour PRIVATE contour-app-model contour-app-setup
     "${webview2_SOURCE_DIR}/build/native/x64/WebView2LoaderStatic.lib"
-    shlwapi version user32 shell32 dwmapi)
+    shlwapi version user32 shell32 dwmapi gdiplus)
 add_custom_target(contour-ui-assets ALL
     COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:contour>/setup"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -74,6 +74,9 @@ if(BUILD_TESTING)
         add_test(NAME desktop-ui-interactions COMMAND "${CONTOUR_NODE_EXECUTABLE}"
             "${PROJECT_SOURCE_DIR}/tests/ui_interaction_tests.cjs" "${CMAKE_CURRENT_SOURCE_DIR}/ui" "${CMAKE_BINARY_DIR}/ui-interaction-checks")
         set_tests_properties(desktop-ui-interactions PROPERTIES TIMEOUT 60)
+        add_test(NAME desktop-tray COMMAND "${CONTOUR_NODE_EXECUTABLE}"
+            "${PROJECT_SOURCE_DIR}/tests/tray_ui_tests.cjs" "${CMAKE_CURRENT_SOURCE_DIR}/ui" "${CMAKE_BINARY_DIR}/tray-ui-checks")
+        set_tests_properties(desktop-tray PROPERTIES TIMEOUT 30)
         add_test(NAME desktop-curve-preview COMMAND "${CONTOUR_NODE_EXECUTABLE}"
             "${PROJECT_SOURCE_DIR}/tests/ui_curve_tests.cjs" "${CMAKE_CURRENT_SOURCE_DIR}/ui" "$<TARGET_FILE:contour-app-tests>")
     endif()

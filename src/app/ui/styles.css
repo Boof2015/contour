@@ -372,6 +372,17 @@ ul { margin: 0; padding: 0; list-style: none; }
 .tray-ft { display: flex; gap: 8px; margin-top: 10px; }
 .tray-ft button { flex: 1; height: 34px; border-radius: 10px; background: var(--ctl); font-weight: 700; }
 .tray-ft button:hover { background: var(--ctl-h); }
+.tray-surface { margin:0; background:var(--pop); font:500 13px/1.4 Manrope,system-ui,sans-serif; color:var(--text); }
+.tray-surface .tray { position:relative; inset:auto; width:100%; max-height:100vh; padding:12px; border-radius:0; box-shadow:none; animation:none; display:flex; flex-direction:column; }
+.tray-surface .tray-body { overflow:auto; min-height:0; }
+.tray-surface .tray-h,.tray-surface .tray-ft,.tray-surface .unsaved { flex:none; }
+.tray-surface .opt,.tray-surface .lyr { width:100%; text-align:left; }
+.tray-surface button:disabled { cursor:default; opacity:.45; }
+.tray-surface button:focus-visible { outline:2px solid var(--text-2); outline-offset:-2px; }
+.tray-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+.tray-surface .opt small,.tray-surface .lyr small { flex:none; max-width:100px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.tray-surface .sec .tray-name { margin-left:auto; max-width:65%; }
+.tray-empty { margin:8px 10px; color:var(--text-2); font-size:12px; }
 
 /* ---------- Profile library ---------- */
 .lib { grid-column: 1 / 3; display: flex; flex-direction: column; min-height: 0; padding: 14px 18px 18px; }

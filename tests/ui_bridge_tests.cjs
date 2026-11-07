@@ -151,6 +151,29 @@ async function main(){
   state.editor.work=latest.work;reply(latest);await turn();
   assert.equal(posts.length,0);
 
+  // Hiding and flyout actions share the editor's in-flight command queue.
+  context.document.activeElement={blur:()=>evaluate('P().work.layers[0].gain=-11; queueEdit();')};
+  messageHandler({data:{event:'hide'}});
+  const hiddenEdit=await take('edit');assert.equal(hiddenEdit.work.layers[0].gain,-11);
+  state.editor.work=hiddenEdit.work;state.editor.dirty=true;reply(hiddenEdit);
+  const hide=await take('window');assert.equal(hide.action,'hide');reply(hide);await turn();
+  assert.equal(evaluate('P().dirty'),true,'Hiding saved or discarded the draft');
+  assert.equal(posts.length,0,'Hiding entered the Quit flow');
+  context.document.activeElement={blur(){}};
+  const current=copy(evaluate('({device:APP.device,profile:P().id,revision:P().revision})'));
+  messageHandler({data:{event:'tray',data:{action:'layer',layer:0,...current,revision:-1}}});await turn();
+  assert.equal(posts.length,0,'Stale tray click edited a newer draft');
+  messageHandler({data:{event:'tray',data:{action:'layer',layer:0,...current}}});
+  const toggled=await take('edit');assert.equal(toggled.work.layers[0].on,false);
+  messageHandler({data:{event:'tray',data:{action:'layer',layer:0,...current}}});await turn();
+  assert.equal(posts.length,0,'Repeated tray click queued a second edit before acknowledgement');
+  state.editor.work=toggled.work;state.editor.revision++;reply(toggled);await turn();
+  assert.equal(evaluate('P().work.layers[0].on'),false,'Tray did not use the editor draft');
+  assert.equal(posts.length,0,'Tray action implicitly saved the profile');
+  messageHandler({data:{event:'tray',data:{action:'eq'}}});
+  const toggle=await take('eq');assert.equal(toggle.enabled,true);reply(toggle);await turn();
+  console.log('PASS close-to-tray flushes focused edits without Save/Quit; stale tray clicks rejected; layer/global toggles use the shared session');
+
   // Sidebar actions on another layer keep the current layer selected.
   evaluate("edit=fn=>{fn();fixSel();};P().work.layers=[Ly('A',true,0,0,true,[]),Ly('B',true,0,0,true,[]),Ly('C',true,0,0,true,[])];S.sel=1;layerAction(0,'down');");
   assert.equal(evaluate('L().name'),'B');assert.equal(evaluate('S.sel'),0);

@@ -74,7 +74,7 @@ function settingsView(){
   return `<div class="body settings-body"><aside class="side settings-nav"><button class="settings-back" data-act="back-eq">${I('back')}Back to EQ</button><nav aria-label="Settings"><button data-settings-tab="outputs" class="${S.settingsTab==='outputs'?'sel':''}">${I('speaker')}Outputs</button><button data-settings-tab="general" class="${S.settingsTab==='general'?'sel':''}">${I('settings')}General</button></nav></aside><main class="settings-main" id="settingsMain">${S.settingsTab==='general'?generalSettings():outputSettings()}</main></div>`;
 }
 function generalSettings(){
-  return `<div class="settings-head"><h1>General</h1></div><section class="preference-row"><div><h2>Appearance</h2><p>Choose how Contour looks.</p></div><div class="theme-options" role="group" aria-label="Appearance">${['dark','light'].map(theme=>`<button data-theme-choice="${theme}" aria-pressed="${S.theme===theme}">${theme==='dark'?'Dark':'Light'}</button>`).join('')}</div></section>`;
+  return `<div class="settings-head"><h1>General</h1></div><section class="preference-row"><div><h2>Appearance</h2><p>Choose how Contour looks.</p></div><div class="theme-options" role="group" aria-label="Appearance">${['dark','light'].map(theme=>`<button data-theme-choice="${theme}" aria-pressed="${S.theme===theme}">${theme==='dark'?'Dark':'Light'}</button>`).join('')}</div></section><section class="preference-row"><div><h2>Close window to tray</h2><p>Keep Contour and your current edits available in the notification area. Right-click its icon and choose Quit to exit.</p></div><button class="sw${APP.closeToTray===false?'':' on'}" data-close-to-tray aria-label="Close window to tray" aria-pressed="${APP.closeToTray!==false}"></button></section>`;
 }
 function engineUpdateView(){
   const operation=['Update','RecoverUpdate'].includes(setupOperation?.action)?setupOperation:null;
@@ -178,6 +178,7 @@ function scanNext(){
   // device list, and is never run concurrently with another setup helper.
   if(pendingSetup){const next=pendingSetup;pendingSetup=null;startSetup(next.action,next.endpoint);return;}
   if(setupOperation||S.setupConfirm)return;
+  if(S.tray){const endpoint=scanQueue.shift();if(endpoint)startSetup('Inspect',endpoint);return;}
   if(S.view==='editor'){
     const index=scanQueue.indexOf(APP.device);if(index<0)return;
     scanQueue.splice(index,1);startSetup('Inspect',APP.device);return;
@@ -190,6 +191,13 @@ function acceptSetup(data){
   // briefly restore the device actions while the helper checks its result.
   if(!pendingSetup&&data.busy&&data.state==='checking'&&setupOperation?.endpoint===data.endpoint){
     data={...data,state:setupProgress(setupOperation.action)};
+  }
+  // A background check is not a new installation result. Keep the last
+  // confirmed state until its completed report replaces it, so tray options
+  // and the editor do not disappear whenever the inspection cache expires.
+  if(data.busy&&data.state==='checking'&&installation(data)==='unknown'){
+    const known=installation(setupReports.get(data.endpoint));
+    if(known!=='unknown')data={...data,installation:known};
   }
   SETUP=data;if(data.endpoint)setupReports.set(data.endpoint,data);
   if(!data.busy){
@@ -219,6 +227,7 @@ function acceptSetup(data){
     },0);
   }
   updateEditorAvailability();updateSettingsStatus();statusbar();
+  publishTray();
   if(!data.busy)setTimeout(scanNext,0);
 }
 function setupRequest(action,endpoint=S.settingsDevice){
@@ -236,7 +245,8 @@ async function startSetup(action,endpoint){
     // Background inspection must leave text editing, pointer gestures and
     // unsaved input alone. Only an explicit install/remove flushes edits.
     if(action!=='Inspect'){document.activeElement?.blur();endGesture();await flush();}
-    SETUP={...setupReports.get(endpoint),endpoint,busy:true,state:setupProgress(action)};
+    const previous=setupReports.get(endpoint);
+    SETUP={...previous,installation:installation(previous),endpoint,busy:true,state:setupProgress(action)};
     setupReports.set(endpoint,SETUP);updateEditorAvailability();updateSettingsStatus();
     const result=await rpc('setup',{action,endpoint});scanStarting=false;acceptSetup(result);
   }catch(error){scanStarting=false;if(action!=='Inspect')setupOperation=null;acceptSetup({...SETUP,busy:false,state:'blocked',notice:error.message,canInstall:false,canRemove:false});}
@@ -261,6 +271,7 @@ function setupAct(action){
   else if(action==='open-eq'){S.openEditorDevice=d.id;command('device',{id:d.id},true);}
 }
 document.addEventListener('click',e=>{
+  if(e.target.closest('[data-close-to-tray]')){command('preferences',{closeToTray:APP.closeToTray===false},true);return;}
   const tab=e.target.closest('[data-settings-tab]');if(tab){S.settingsTab=tab.dataset.settingsTab;render();if(S.settingsTab==='outputs')scanNext();return;}
   const theme=e.target.closest('[data-theme-choice]');if(theme){S.theme=theme.dataset.themeChoice;localStorage.setItem('theme',S.theme);render();syncWindowTheme();return;}
   const engine=e.target.closest('[data-engine-act]');if(engine){engineAct(engine.dataset.engineAct);return;}

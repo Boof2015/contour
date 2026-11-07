@@ -170,6 +170,7 @@ Model::Model(std::filesystem::path path,std::vector<Device> devices,IMMDeviceEnu
         const auto settings=Json::parse(*bytes);
         if (settings.at("version")!=1) { throw std::runtime_error("Unrecognized Contour settings version"); }
         eq_enabled_=settings.at("eqEnabled").get<bool>();
+        close_to_tray_=settings.value("closeToTray",true);
     }
     bind(0);
 }
@@ -195,7 +196,7 @@ void Model::suspend_connections(bool value) {
 void Model::set_eq_enabled(bool enabled) {
     // Persist intent first. A device failure is reported separately and never
     // changes a profile checkpoint or its undo history.
-    detail::write_file(settings_path_,Json{{"version",1},{"eqEnabled",enabled}}.dump());
+    detail::write_file(settings_path_,Json{{"version",1},{"eqEnabled",enabled},{"closeToTray",close_to_tray_}}.dump());
     eq_enabled_=enabled; master_issues_=Json::array();master_updates_.clear();
     const auto apply=[&](ProfileDeviceSession& session,const std::wstring& id) {
         const auto& status=session.set_bypass_override(!enabled);
@@ -370,6 +371,11 @@ Json Model::dispatch(const Json& request) {
         next_device_=index; return close(request);
     }
     if (deferred_close_||session_->close_status().state!=CloseState::open) { throw std::runtime_error("Finish or cancel closing first"); }
+    if (op=="preferences") {
+        const auto value=request.at("closeToTray").get<bool>();
+        detail::write_file(settings_path_,Json{{"version",1},{"eqEnabled",eq_enabled_},{"closeToTray",value}}.dump());
+        close_to_tray_=value;return state();
+    }
     if (op=="profile_preview") {
         // Saved library thumbnails are requested on demand. The selected
         // profile already has its working draft in the editor state.
@@ -445,7 +451,7 @@ Json Model::state(bool include_document) {
         result["devices"].push_back({{"id",utf8(d.id)},{"name",d.name},{"channels",d.channels},{"rate",d.rate},{"mask",d.mask},{"available",d.available},{"state",d.state},{"running",d.contour_running},
             {"connection",{{"checking",connection.busy},{"confirmed",connection.confirmed},{"detail",connection.detail}}}});
     }
-    result["eqEnabled"]=eq_enabled_; result["masterIssues"]=master_issues_;
+    result["eqEnabled"]=eq_enabled_; result["masterIssues"]=master_issues_;result["closeToTray"]=close_to_tray_;
     result["profiles"]=Json::array();
     for (const auto& p:library_.entries()) {
         Json used=Json::array();

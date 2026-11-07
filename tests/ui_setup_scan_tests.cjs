@@ -72,5 +72,26 @@ async function main(){
   evaluate("S.view='editor';");report(ids[2]);await wait();
   assert.equal(posts.length,0);
   console.log('PASS recent checks reused; format invalidation; inspection failures retried; cache expiry; manual Refresh forces checks; navigation pauses background work');
+
+  // Reopening the tray after the cache expires must retain known outputs and
+  // profile choices through both the immediate and asynchronous progress reports.
+  evaluate('scanQueue=[];');
+  const installed={state:'attached',installation:'installed',canInstall:false,canRemove:true};
+  report(ids[2],installed);report(ids[0],installed);await wait();
+  evaluate("S.tray=true;APP.profiles=[{id:'peq',name:'My EQ',channels:2}];for(const cached of setupCache.values())cached.time-=60001;");
+  const trayBefore=evaluate('JSON.stringify(trayData())');
+  await refresh();await inspect(ids[2]);
+  assert.equal(evaluate('JSON.stringify(trayData())'),trayBefore,'Expiry progress removed known tray outputs or profiles');
+  report(ids[2],{state:'checking',busy:true});await wait();
+  assert.equal(evaluate('JSON.stringify(trayData())'),trayBefore,'Repeated progress removed known installation state');
+  report(ids[2],installed);await inspect(ids[0]);
+  assert.equal(evaluate('JSON.stringify(trayData())'),trayBefore,'Checking another installed output changed tray options');
+  report(ids[0]);await inspect(ids[1]);
+  assert.equal(evaluate('trayData().devices.length'),1,'Completed removal retained a stale installed output');
+  assert.equal(evaluate('trayData().profiles.length'),1,'An unrelated removal hid the selected output profiles');
+  report(ids[1]);await inspect(ids[3]);report(ids[3]);await wait();
+  report(ids[2],{state:'blocked',installation:'unknown',reason:'inspection_failed',canInstall:false});await wait();
+  assert.equal(evaluate('trayData().devices.length'),0,'A completed inconclusive check was treated as installed');
+  console.log('PASS expired tray refresh retains outputs/profile choices through progress; completed removal and failed checks replace prior state');
 }
 main().catch(e=>{console.error(e);process.exitCode=1;});

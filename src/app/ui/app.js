@@ -7,11 +7,53 @@ let SETUP={state:'idle',busy:false};
 let layerDrag=null,ignoreLayerClickUntil=0;
 function windowButtons(){return `<div class="caption"><button data-window="minimize" aria-label="Minimize" title="Minimize"><svg viewBox="0 0 10 10"><path d="M0 5.5h10"/></svg></button><button data-window="maximize" id="maximize" aria-label="${WINDOW.maximized?'Restore':'Maximize'}" title="${WINDOW.maximized?'Restore':'Maximize'}"><svg viewBox="0 0 10 10">${WINDOW.maximized?'<path d="M2.5 2.5v-2h7v7h-2M.5 2.5h7v7h-7z"/>':'<path d="M.5.5h9v9h-9z"/>'}</svg></button><button data-window="close" aria-label="Close window" title="Close"><svg viewBox="0 0 10 10"><path d="m.5.5 9 9m0-9-9 9"/></svg></button></div>`;}
 function windowState(data){
-  if(WINDOW.custom===data.custom&&WINDOW.maximized===data.maximized)return;
+  if(WINDOW.custom===data.custom&&WINDOW.maximized===data.maximized&&WINDOW.tray===data.tray)return;
   WINDOW=data;document.documentElement.dataset.customFrame=data.custom;document.documentElement.dataset.maximized=data.maximized;
   const bar=$('.caption');if(bar)bar.outerHTML=windowButtons();
+  publishTray();
 }
 function syncWindowTheme(){rpc('window',{action:'theme',theme:S.theme}).catch(e=>toast(e.message));}
+let traySyncTimer=0,traySignature='',trayWorking=false;
+function trayData(){
+  const p=P(),gate=editorGate();
+  const installed=d=>installation(setupReports.get(d.id))==='installed'||(!setupReports.has(d.id)&&(d.running||d.connection?.confirmed||(d.id===APP.device&&!gate)));
+  return {theme:S.theme,eqEnabled:APP.eqEnabled!==false,device:APP.device,busy:!!setupOperation||trayWorking,
+    attention:!!S.modal||APP.closing?.state!=='open',gated:!!gate,
+    devices:APP.devices.filter(installed).map(d=>({id:d.id,name:d.name,channels:d.channels,available:d.available})),
+    profiles:installed(D())?APP.profiles.filter(q=>q.channels===D().channels).map(q=>({id:q.id,name:q.name})):[],
+    profile:p?{id:p.id,name:p.name,revision:p.revision,dirty:p.dirty,layers:LAYERS().map(l=>({name:l.name,on:l.on,target:targetSummary(D(),l,true)}))}:null,
+    note:setupOperation?'Device setup is in progress.':gate?'Open Contour to manage this device.':!p?'Choose a profile, or open Contour to create one.':''};
+}
+function publishTray(force=false){
+  if(!WINDOW.tray||!APP)return;
+  clearTimeout(traySyncTimer);
+  traySyncTimer=setTimeout(()=>{
+    const data=trayData(),signature=JSON.stringify(data);
+    if(!force&&signature===traySignature)return;traySignature=signature;
+    rpc('window',{action:'tray-state',data}).catch(()=>{traySignature='';});
+  },0);
+}
+async function handleTrayAction(r){
+  if(r.action==='dismissed'){S.tray=false;return;}
+  if(trayWorking){publishTray(true);return;}
+  trayWorking=true;
+  document.activeElement?.blur();endGesture();
+  try{
+    await flush();
+    if(r.action==='open'){
+      S.tray=true;await rpc('window',{action:'tray-open',data:trayData()});refreshDevices();return;
+    }
+    if(setupOperation||S.modal||APP.closing?.state!=='open')return;
+    // A delayed click must never act on a new device, profile or layer order.
+    if(r.action!=='eq'&&(r.device!==APP.device||r.profile!==P()?.id||r.revision!==P()?.revision))return;
+    if(r.action==='eq')await command('eq',{enabled:APP.eqEnabled===false},true);
+    else if(r.action==='device'&&trayData().devices.some(d=>d.id===r.id&&d.available))await command('device',{id:r.id},true);
+    else if(r.action==='profile'&&!editorGate()&&APP.profiles.some(p=>p.id===r.id&&p.channels===D().channels))await switchProfile(r.id);
+    else if(r.action==='layer'&&!editorGate()&&Number.isInteger(r.layer)&&LAYERS()[r.layer]){edit(()=>{LAYERS()[r.layer].on=!LAYERS()[r.layer].on;});await flush();}
+    else if(['save','revert'].includes(r.action)&&P()&&!editorGate())await command(r.action,{},true);
+  }catch(error){toast(error.message);rpc('window',{action:'show'}).catch(()=>{});}
+  finally{trayWorking=false;publishTray(true);}
+}
 const S={settingsTab:'outputs',settingsDevice:null,setupConfirm:null,showDisconnected:false,openEditorDevice:null,theme:localStorage.getItem('theme')||'dark',sel:0,band:0,output:false,outMode:'layer',outMask:0,view:'editor',pop:null,modal:null,tray:false};
 const P=()=>APP?.editor;
 const D=()=>{
@@ -68,7 +110,7 @@ async function command(op,args={},quiet=false){
     await flush();const data=await rpc(op,args);adopt(data);fixSel();render();handleClose();
     if(!quiet&&op==='save')toast(APP.status.copy==='current'?'Profile saved':'Profile saved · device update pending');
     return data;
-  }catch(error){if(error.state)adopt(error.state);render();toast(error.message);return null;}
+  }catch(error){if(error.state)adopt(error.state);render();toast(error.message);if(trayWorking)rpc('window',{action:'show'}).catch(()=>{});return null;}
 }
 let gesture=false,nudgeTimer=0;
 function push(){} // History is recorded by EditSession::replace, not the web view.
@@ -257,6 +299,7 @@ function positionPopover(){
 }
 function closePopover(restore=false){const anchor=$(popAnchor());S.pop=null;renderOver();if(restore)anchor?.focus({preventScroll:true});}
 function renderOver(){
+  publishTray();
   const over=$('#over');
   const m=S.modal;
   if(m!==shownModal){$('#modalHost')?.remove();shownModal=m;shownModalHtml='';}
@@ -470,6 +513,8 @@ if(window.chrome?.webview){
     if(message.requestId!==undefined){const pending=replies.get(message.requestId);if(!pending)return;replies.delete(message.requestId);if(message.ok)pending.resolve(message.data);else{const error=new Error(message.error);error.state=message.state;pending.reject(error);}return;}
     if(message.event==='window'){windowState(message.data);return;}
     if(message.event==='setup'){acceptSetup(message.data);return;}
+    if(message.event==='tray'){handleTrayAction(message.data);return;}
+    if(message.event==='hide'){document.activeElement?.blur();endGesture();flush().then(()=>rpc('window',{action:'hide'})).catch(e=>toast(e.message));return;}
     if(message.event==='close'){document.activeElement?.blur();endGesture();command('close',{},true);return;}
     if(message.event==='error'){toast(message.error);return;}
     if(message.event==='status'&&APP){
@@ -477,6 +522,7 @@ if(window.chrome?.webview){
       const rateChanged=canAdopt&&message.data.editor?.curveRate!==rate;
       adopt(message.data,canAdopt);statusbar();handleClose();
       updateEditorAvailability();updateSettingsStatus();
+      publishTray();
       if(before!==P()?.id||rateChanged)command('state',{},true);
     }
   });
