@@ -188,6 +188,13 @@ async function main(){
   context.document.activeElement={blur(){}};
   console.log('PASS layer export flushes focused edits, uses the acknowledged revision, and Cancel releases the picker');
 
+  context.document.activeElement={blur:()=>evaluate('P().work.layers[0].gain=-8; queueEdit();')};
+  messageHandler({data:{event:'session-ending'}});
+  const shutdownEdit=await take('edit');assert.equal(shutdownEdit.work.layers[0].gain,-8);state.editor.work=shutdownEdit.work;reply(shutdownEdit);
+  const checkpoint=await take('checkpoint');reply(checkpoint);await turn();
+  assert.equal(posts.length,0,'Shutdown saved, closed or changed EQ instead of checkpointing');context.document.activeElement={blur(){}};
+  console.log('PASS session-ending flushes the focused edit before requesting a disk-only recovery checkpoint');
+
   // Sidebar actions on another layer keep the current layer selected.
   evaluate("edit=fn=>{fn();fixSel();};P().work.layers=[Ly('A',true,0,0,true,[]),Ly('B',true,0,0,true,[]),Ly('C',true,0,0,true,[])];S.sel=1;layerAction(0,'down');");
   assert.equal(evaluate('L().name'),'B');assert.equal(evaluate('S.sel'),0);

@@ -65,8 +65,11 @@ const roundF = v => v < 100 ? Math.round(v * 10) / 10 : v < 1000 ? Math.round(v)
 const r1 = v => Math.round(v * 10) / 10, rq = v => v < 10 ? Math.round(v * 100) / 100 : Math.round(v * 10) / 10;
 function get(k, i) { return k === 'lgain' ? L().gain : L().filters[i][k]; }
 function set(k, i, v) {
-  if (k === 'lgain') { L().gain = r1(clamp(v, -120, 36)); return; }
-  const f = L().filters[i];
+  setLayerField(L(),k,i,v);
+}
+function setLayerField(layer,k,i,v) {
+  if (k === 'lgain') { layer.gain = r1(clamp(v, -120, 36)); return; }
+  const f = layer.filters[i];
   if (k === 'freq') f.freq = roundF(clamp(v, 1, NYQ - 1));
   else if (k === 'gain') f.gain = r1(clamp(v, -120, 36));
   else f.q = rq(clamp(v, .05, 1000));

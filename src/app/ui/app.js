@@ -66,6 +66,24 @@ const L=()=>LAYERS()[S.sel];
 const dirty=p=>!!p?.dirty;
 function fixSel(){S.sel=clamp(S.sel,0,Math.max(0,LAYERS().length-1));S.band=clamp(S.band,0,Math.max(0,(L()?.filters.length||0)-1));}
 function rawWork(){return JSON.parse(JSON.stringify(P().work,(k,v)=>k==='coefficients'||k==='_gain'?undefined:v));}
+// Preserve a valid field still being typed without auditioning it or changing
+// undo history. The normal blur/Enter path remains the editing commit.
+let inputRecoveryTicket=0,inputRecoveryPending=false;
+document.addEventListener('input',async e=>{
+  const el=e.target;if(!P()||editorGate()||!el.matches?.('.win .fld input,#lnIn'))return;
+  const ticket=++inputRecoveryTicket;inputRecoveryPending=true;
+  try{
+    await flush();if(ticket!==inputRecoveryTicket||document.activeElement!==el)return;
+    const work=rawWork(),layer=work.layers[S.sel];if(!layer)return;
+    if(el.id==='lnIn'){if(!el.value.trim()){await rpc('recovery_input',{clear:true});return;}layer.name=el.value.trim();}
+    else {const value=parse(el.dataset.k,el.value,el.dataset.unit);if(value===null){await rpc('recovery_input',{clear:true});return;}setLayerField(layer,el.dataset.k,+el.dataset.i,value);}
+    await rpc('recovery_input',{id:P().id,revision:P().revision,work});
+  }catch{} // Invalid or superseded input is never applied to audio.
+});
+document.addEventListener('focusout',e=>{
+  if(!inputRecoveryPending||!e.target.matches?.('.win .fld input,#lnIn'))return;
+  inputRecoveryPending=false;++inputRecoveryTicket;rpc('recovery_input',{clear:true}).catch(()=>{});
+});
 function rpc(op,args={}) {
   const run=()=>new Promise((resolve,reject)=>{
     // A command may have its own profile/device `id`. Keep reply correlation
@@ -206,6 +224,7 @@ async function loadProfilePreviews(){
   }finally{profilePreviewsLoading=false;}
 }
 function profileLibraryView(){
+  const recovery=(APP.recoveries||[]).length?`<section class="recovery-list"><h3>Unsaved edits from your previous session</h3><p>Keep them as a new profile to review. Your saved profiles and device EQ are unchanged.</p>${APP.recoveries.map(r=>`<div class="recovery-row"><span><strong>${esc(r.name)}</strong><small>${esc(r.device)}</small></span><button class="settings-button" data-recovery="keep" data-recovery-id="${esc(r.id)}">Keep as new profile</button><button class="settings-button" data-recovery="discard" data-recovery-id="${esc(r.id)}">Discard</button></div>`).join('')}</section>`:'';
   const cards=APP.profiles.map(p=>{
     const used=p.usedBy||[],current=p.id===P()?.id,match=p.channels===D().channels;
     const count=(n,label)=>`${n??0} ${label}${n===1?'':'s'}`;
@@ -213,7 +232,7 @@ function profileLibraryView(){
     const button=(action,label,icon,disabled=false)=>`<button class="ib" data-profile-action="${action}" data-profile-id="${esc(p.id)}" title="${esc(label)}" aria-label="${esc(label)}" ${disabled?'disabled':''}>${I(icon)}</button>`;
     return `<article class="card${current?' sel':''}" data-profile-card="${esc(p.id)}"><div class="top"><span class="nm">${esc(p.name)}</span>${current&&P().dirty?'<span class="dot" title="Unsaved changes"></span>':''}<span class="lay">${p.channels===2?'Stereo':p.channels+' channels'}</span></div><div class="meta"><span>${count(p.layers,'layer')}</span><span>${count(p.filters,'filter')}</span></div><div class="profile-preview">${profilePreviewContent(p)}</div><p class="profile-usage">${esc(usage)}</p>${!match?`<p class="warn">This profile has ${p.channels} channels. ${esc(D().name)} has ${D().channels}.</p>`:''}<div class="acts"><button class="use" data-prof="${esc(p.id)}" ${current||!match||editorGate()?'disabled':''}>${current?'In use here':match?'Use on this device':'Different layout'}</button>${button('duplicate','Duplicate '+p.name,'copy')}${button('rename','Rename '+p.name,'pen')}${button('export',current&&P().dirty?'Export current edits':'Export '+p.name,'export',profileExportBusy)}${button('delete',p.canDelete?'Delete '+p.name:'Select another profile on its devices before deleting','trash',!p.canDelete)}</div></article>`;
   }).join('');
-  return `<div class="body"><main class="lib"><div class="lib-h"><button class="back" data-act="back-eq">${I('back')}Editor</button><h2>Profiles</h2><span class="n">${APP.profiles.length}</span><span class="grow"></span><button class="act" data-act="import-profile">${I('import')}Import profile…</button><button class="act" data-act="new-profile" ${editorGate()?'disabled':''}>${I('plus')}New profile</button><input id="profileFile" type="file" accept=".contour" hidden></div>${cards?`<div class="cards profiles-list">${cards}</div>`:'<div class="profile-empty"><h3>No profiles yet</h3><p>Create a profile or import a .contour file.</p></div>'}</main></div>`;
+  return `<div class="body"><main class="lib"><div class="lib-h"><button class="back" data-act="back-eq">${I('back')}Editor</button><h2>Profiles</h2><span class="n">${APP.profiles.length}</span><span class="grow"></span><button class="act" data-act="import-profile">${I('import')}Import profile…</button><button class="act" data-act="new-profile" ${editorGate()?'disabled':''}>${I('plus')}New profile</button><input id="profileFile" type="file" accept=".contour" hidden></div>${recovery}${cards?`<div class="cards profiles-list">${cards}</div>`:'<div class="profile-empty"><h3>No profiles yet</h3><p>Create a profile or import a .contour file.</p></div>'}</main></div>`;
 }
 async function openProfiles(){
   if(setupOperation||APP.closing?.state!=='open')return;
@@ -457,6 +476,12 @@ document.addEventListener('click',async e=>{
   if(S.pop&&!t.closest('#pop'))closePopover();
   const device=t.closest('[data-device]');if(device){S.pop=null;await command('device',{id:device.dataset.device},true);return;}
   const profileActionButton=t.closest('[data-profile-action]');if(profileActionButton){if(!profileActionButton.disabled)profileAction(profileActionButton.dataset.profileAction,profileActionButton.dataset.profileId);return;}
+  const recovery=t.closest('[data-recovery]');if(recovery){
+    const id=recovery.dataset.recoveryId;
+    if(recovery.dataset.recovery==='keep'){recovery.disabled=true;await command('recovery_keep',{id});}
+    else dialog('Discard recovered edits?','This removes this recovery copy. Your saved profiles will be kept.',[['cancel','Cancel'],['discard','Discard','danger']],undefined,{discard:()=>command('recovery_discard',{id})});
+    return;
+  }
   const pf=t.closest('[data-prof]');if(pf){switchProfile(pf.dataset.prof);return;}
   const target=S.pop==='impch'?S.modal:L(),ch=fn=>{if(S.pop==='impch'){fn(target);renderOver();}else edit(()=>fn(target));};
   const co=t.closest('[data-chopt]');if(co){ch(l=>{l.all=co.dataset.chopt==='all';l.mask=l.all?0:(1<<+co.dataset.chopt)>>>0;});return;}
@@ -527,6 +552,7 @@ if(window.chrome?.webview){
     if(message.event==='setup'){acceptSetup(message.data);return;}
     if(message.event==='tray'){handleTrayAction(message.data);return;}
     if(message.event==='hide'){document.activeElement?.blur();endGesture();flush().then(()=>rpc('window',{action:'hide'})).catch(e=>toast(e.message));return;}
+    if(message.event==='session-ending'){document.activeElement?.blur();endGesture();flush().then(()=>rpc('checkpoint')).catch(()=>{});return;}
     if(message.event==='close'){document.activeElement?.blur();endGesture();command('close',{},true);return;}
     if(message.event==='error'){toast(message.error);return;}
     if(message.event==='status'&&APP){
@@ -538,6 +564,6 @@ if(window.chrome?.webview){
       if(before!==P()?.id||rateChanged)command('state',{},true);
     }
   });
-  rpc('state').then(data=>{adopt(data);render();syncWindowTheme();}).catch(error=>{$('#win').innerHTML=`<div class="fatal">${esc(error.message)}</div>`;});
+  rpc('state').then(data=>{adopt(data);if(APP.recoveries?.length)S.view='library';render();syncWindowTheme();}).catch(error=>{$('#win').innerHTML=`<div class="fatal">${esc(error.message)}</div>`;});
 }else $('#win').innerHTML='<div class="fatal">Open Contour.exe to use this editor.</div>';
 

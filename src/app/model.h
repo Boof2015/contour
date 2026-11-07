@@ -33,6 +33,9 @@ public:
     void poll();
     bool closed() const noexcept;
     bool close_to_tray() const noexcept { return close_to_tray_; }
+    bool start_in_tray() const noexcept { return start_in_tray_; }
+    // Disk-only recovery checkpoint. Never saves a profile or contacts audio.
+    void checkpoint_draft();
     const Device& selected_device() const noexcept { return devices_[device_]; }
     const Device* find_device(std::wstring_view id) const noexcept;
     void refresh_devices();
@@ -58,6 +61,14 @@ private:
     std::filesystem::path settings_path_;
     bool eq_enabled_=true;
     bool close_to_tray_=true;
+    bool start_in_tray_=false;
+    std::filesystem::path recovery_path_;
+    Json recoveries_=Json::array();
+    std::string recovery_id_,last_checkpoint_,recovery_warning_;
+    std::uint64_t last_checkpoint_time_=0;
+    std::optional<eq::Profile> input_recovery_;
+    std::string input_profile_id_;
+    std::uint64_t input_revision_=0;
     Json master_issues_=Json::array();
     std::unique_ptr<AudioConnection> connection_;
     bool connections_suspended_=false;

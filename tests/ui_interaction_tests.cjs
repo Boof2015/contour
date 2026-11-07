@@ -12,13 +12,16 @@ const fixture=()=>{
   state.profiles=[{id:'test-profile',name:'Test profile',channels:2,revision:1,layers:3,filters:3,canDelete:false,usedBy:[{id:'test-output',name:'Offline test output',available:true}]},
     {id:'test-unused',name:'Unused <profile>',channels:2,revision:7,layers:2,filters:5,canDelete:true,usedBy:[]},
     {id:'test-assigned',name:'Surround profile',channels:6,revision:1,layers:1,filters:4,canDelete:false,usedBy:[{id:'test-disconnected',name:'Disconnected test device',available:false}]}];
-  state.eqEnabled=true;state.masterIssues=[];state.devices[0].available=true;
+  state.eqEnabled=true;state.masterIssues=[];state.devices[0].available=true;state.startInTray=false;state.closeToTray=true;state.recoveries=[];
+  let startWithWindows=false;
   state.devices.push({id:'test-second',name:'Second test device',channels:2,rate:48000,mask:3,available:true},{id:'test-disconnected',name:'Disconnected test device',channels:0,rate:0,mask:0,available:false,state:8});
   const installed=new Set(['test-output']);
   let engineUpdate=new URL(location.href).searchParams.has('engine-update');
   if(engineUpdate)window.addEventListener('load',()=>openSettings('outputs'));
   if(new URL(location.href).searchParams.has('profiles'))window.addEventListener('load',()=>openProfiles());
   if(new URL(location.href).searchParams.has('layer-menu'))window.addEventListener('load',()=>{S.pop='layermenu';renderOver();});
+  if(new URL(location.href).searchParams.has('general'))window.addEventListener('load',()=>openSettings('general'));
+  if(new URL(location.href).searchParams.has('recovery'))state.recoveries=[{id:'recovery-1',name:'My EQ',device:'Offline test output'}];
   if(new URL(location.href).searchParams.has('uninstalled')){
     installed.delete('test-output');state.editor=null;state.status={endpoint:'unavailable'};
     state.devices[0].name='Speakers (Steam Streaming Speakers)';
@@ -29,6 +32,16 @@ const fixture=()=>{
     if(r.op==='window')data={custom:false,maximized:false};
     if(r.op==='edit'){state.editor.work=r.work;state.editor.revision++;state.editor.dirty=true;window.testEdits.push(structuredClone(r.work));}
     if(r.op==='eq')state.eqEnabled=r.enabled;
+    if(r.op==='preferences'){for(const key of ['startInTray','closeToTray'])if(key in r)state[key]=r[key];}
+    if(r.op==='startup'){
+      if(r.action==='set'&&window.failStartup){setTimeout(()=>receive({data:{requestId:r.requestId,ok:false,error:'Test startup registration failure'}}),0);return;}
+      if(r.action==='set')startWithWindows=r.enabled;
+      data={available:true,enabled:startWithWindows,note:'Open Contour when you sign in. Windows can also disable it in Startup apps.'};
+    }
+    if(['recovery_keep','recovery_discard'].includes(r.op)){
+      state.recoveries=state.recoveries.filter(item=>item.id!==r.id);
+      if(r.op==='recovery_keep')state.profiles.push({id:'kept-recovery',name:'My EQ (recovered)',channels:2,revision:1,layers:1,filters:1,canDelete:true,usedBy:[]});
+    }
     if(r.op==='profile_export')data=window.cancelExport?{cancelled:true}:{cancelled:false,filename:'Test profile.contour'};
     if(r.op==='layer_export')data=window.cancelExport?{cancelled:true}:{cancelled:false,filename:'Filters.txt'};
     if(r.op==='profile_preview'){
@@ -136,6 +149,14 @@ const checks=async()=>{
     $('.layers [data-layer]').focus();key(document.activeElement,'Delete');assert(L().filters.length===1,'Delete in layer pane removed a filter');
     results.push('Delete removes the selected filter without stealing text editing or layer-pane keys');
 
+    const focusedGain=$('.gainbox input'),inputRequests=window.testRequests.length,gainBefore=L().gain;
+    focusedGain.focus();focusedGain.value='-7.5';focusedGain.dispatchEvent(new Event('input',{bubbles:true}));await wait(60);
+    const typingCopy=window.testRequests.slice(inputRequests).find(r=>r.op==='recovery_input'&&!r.clear);
+    assert(typingCopy?.work.layers[S.sel].gain===-7.5&&L().gain===gainBefore&&!window.testRequests.slice(inputRequests).some(r=>r.op==='edit'),'Typing recovery auditioned a value or lost the pending field');
+    key(focusedGain,'Escape');await wait(40);
+    assert(window.testRequests.slice(inputRequests).some(r=>r.op==='recovery_input'&&r.clear)&&L().gain===gainBefore,'Escape kept the recovery-only field');
+    results.push('Valid focused fields have a recovery copy without auditioning; Escape clears that copy');
+
     const layerBefore=structuredClone(L()),layerIndex=S.sel;
     $('#layerMenuBtn').click();$('[data-act="rename-layer"]').click();
     assert(document.activeElement===$('#lnIn')&&$('#lnIn').selectionEnd===L().name.length,'Rename did not focus and select the layer name');
@@ -196,7 +217,17 @@ const checks=async()=>{
     assert(!$('.install-review')&&!$('[data-setup-act]')&&$('[data-device-detail="test-second"] .device-explanation')===progress,'Verification restored controls or rebuilt the progress message');
     window.testSetup({endpoint:'test-second',state:'available',installation:'not_installed',busy:false,canInstall:true,canRemove:false});await wait(30);
     assert($('[data-setup-act="install"]')&&!$('[data-setup-act="uninstall"]')&&!S.setupConfirm,'Finished removal left stale uninstall UI');
-    $('[data-settings-tab="general"]').click();$('[data-theme-choice="light"]').click();assert(document.documentElement.dataset.theme==='light','General appearance preference failed');
+    $('[data-settings-tab="general"]').click();await wait(50);
+    const preferenceWork=JSON.stringify(P().work),preferenceDirty=P().dirty;
+    assert($('[data-start-with-windows]').getAttribute('aria-pressed')==='false'&&$('[data-start-in-tray]').getAttribute('aria-pressed')==='false','Startup defaults were enabled');
+    $('[data-start-with-windows]').click();await wait(50);assert(STARTUP.enabled,'Start with Windows did not register');
+    $('[data-start-in-tray]').click();await wait(50);assert(APP.startInTray&&APP.closeToTray,'Start in tray changed close behavior');
+    window.failStartup=true;$('[data-start-with-windows]').click();await wait(50);
+    assert(STARTUP.enabled&&!$('[data-start-with-windows]').disabled&&$('#toast').textContent.includes('failure'),'Startup failure claimed success or stranded the toggle');window.failStartup=false;
+    $('[data-start-with-windows]').click();await wait(50);assert(!STARTUP.enabled&&APP.startInTray,'Startup toggles were coupled');
+    assert(JSON.stringify(P().work)===preferenceWork&&P().dirty===preferenceDirty,'Startup preferences edited the profile');
+    results.push('Startup defaults are off, controls remain independent, and registration failure preserves the actual state');
+    $('[data-theme-choice="light"]').click();assert(document.documentElement.dataset.theme==='light','General appearance preference failed');
     $('[data-act="back-eq"]').click();await wait(60);assert($('#graph')&&APP.eqEnabled===false&&JSON.stringify(P().work)===workBefore,'Returning from Settings lost the editor or master state');
     results.push('Global EQ is independent of profiles; single Install; uninstall review clears on start and progress stays stable through verification');
 
@@ -227,6 +258,16 @@ const checks=async()=>{
     assert($('[data-profile-card="test-imported"]')&&APP.device===deviceBefore&&P().id===profileBefore&&JSON.stringify(P().work)===workBefore,'Import selected itself or lost the current draft');
     $('[data-act="back-eq"]').click();await wait(40);
     results.push('Profile library shows device usage, guards assigned deletion, confirms exact unused revision, exports without saving, cancels cleanly, and imports without applying');
+
+    window.testState.recoveries=[{id:'recover-1',name:'Earlier EQ',device:'Offline test output'},{id:'recover-2',name:'Another EQ',device:'Second test device'}];
+    APP.recoveries=structuredClone(window.testState.recoveries);await openProfiles();
+    const recoveryBefore=window.testRequests.length;
+    $('[data-recovery="keep"]').click();await wait(60);
+    assert(APP.recoveries.length===1&&$('[data-profile-card="kept-recovery"]'),'Keep did not create a separate profile');
+    assert(P().id===profileBefore&&JSON.stringify(P().work)===workBefore&&!window.testRequests.slice(recoveryBefore).some(r=>['edit','save','select','eq'].includes(r.op)),'Keeping recovery changed current EQ');
+    $('[data-recovery="discard"]').click();$('[data-mb="cancel"]').click();assert(APP.recoveries.length===1,'Cancel discarded recovery');
+    $('[data-recovery="discard"]').click();$('[data-mb="discard"]').click();await wait(40);assert(!$('.recovery-list'),'Discard left recovery visible');
+    results.push('Recovery is reviewed separately, kept without applying, or discarded with confirmation');
 
     await openSettings('outputs');await wait(40);
     const engineOffer={canUpdate:true,engineState:'update_available',engineDevices:['Offline test output','Second test device']};

@@ -172,8 +172,35 @@ Model::Model(std::filesystem::path path,std::vector<Device> devices,IMMDeviceEnu
         if (settings.at("version")!=1) { throw std::runtime_error("Unrecognized Contour settings version"); }
         eq_enabled_=settings.at("eqEnabled").get<bool>();
         close_to_tray_=settings.value("closeToTray",true);
+        start_in_tray_=settings.value("startInTray",false);
     }
+    recovery_path_=path.wstring()+L".drafts";
+    GUID recovery_id{};check(CoCreateGuid(&recovery_id),"Cannot identify the recovery copy");
+    wchar_t id[40]{};StringFromGUID2(recovery_id,id,40);recovery_id_=utf8(id);
+    if(const auto bytes=detail::read_file(recovery_path_,32*1024*1024)) {
+        const auto saved=Json::parse(*bytes);
+        if(saved.at("version")!=1 || !saved.at("drafts").is_array() || saved.at("drafts").size()>128)throw std::runtime_error("Cannot read Contour's recovery copies; the file has been kept");
+        for(const auto& draft:saved.at("drafts")) {
+            text(draft,"id");text(draft,"name");text(draft,"device",4096);
+            parse_profile(text(draft,"text",1024*1024));
+        }
+        recoveries_=saved.at("drafts");
+    }
+    last_checkpoint_=Json{{"version",1},{"drafts",recoveries_}}.dump();
     bind(0);
+}
+void Model::checkpoint_draft() {
+    auto drafts=recoveries_;
+    const auto doc=session_->current();
+    if(doc) {
+        auto profile=input_recovery_&&input_profile_id_==doc->id()&&input_revision_==doc->editor()->snapshot()->revision()?*input_recovery_:doc->editor()->working();
+        profile.configuration.bypass=false;
+        if(profile!=doc->editor()->saved())drafts.push_back({{"id",recovery_id_},{"name",doc->name()},{"device",selected_device().name},{"text",serialize_profile(profile)}});
+    }
+    const auto bytes=Json{{"version",1},{"drafts",drafts}}.dump();
+    if(drafts.size()>128||bytes.size()>32*1024*1024)throw std::runtime_error("Recovery storage is full. Review previous unsaved edits in Profiles.");
+    if(bytes!=last_checkpoint_) { detail::write_file(recovery_path_,bytes);last_checkpoint_=bytes; }
+    recovery_warning_.clear();last_checkpoint_time_=GetTickCount64();
 }
 const Device* Model::find_device(std::wstring_view id) const noexcept {
     const auto it=std::find_if(devices_.begin(),devices_.end(),[&](const auto& d){return d.id==id;});
@@ -197,7 +224,7 @@ void Model::suspend_connections(bool value) {
 void Model::set_eq_enabled(bool enabled) {
     // Persist intent first. A device failure is reported separately and never
     // changes a profile checkpoint or its undo history.
-    detail::write_file(settings_path_,Json{{"version",1},{"eqEnabled",enabled},{"closeToTray",close_to_tray_}}.dump());
+    detail::write_file(settings_path_,Json{{"version",1},{"eqEnabled",enabled},{"closeToTray",close_to_tray_},{"startInTray",start_in_tray_}}.dump());
     eq_enabled_=enabled; master_issues_=Json::array();master_updates_.clear();
     const auto apply=[&](ProfileDeviceSession& session,const std::wstring& id) {
         const auto& status=session.set_bypass_override(!enabled);
@@ -312,6 +339,9 @@ void Model::inspect() {
 }
 bool Model::closed() const noexcept { return session_->close_status().state==CloseState::closed; }
 void Model::poll() {
+    if(GetTickCount64()-last_checkpoint_time_>=1000) {
+        try { checkpoint_draft(); } catch(const std::exception& e) { recovery_warning_=e.what();last_checkpoint_time_=GetTickCount64(); }
+    }
     if(connections_suspended_)return;
     poll_master_updates();
     if(deferred_close_&&master_updates_.empty()) {
@@ -361,6 +391,7 @@ Json Model::dispatch(const Json& request) {
     if (!request.is_object()) { throw std::invalid_argument("Invalid editor request"); }
     const auto op=text(request,"op",40);
     if (op=="state") { poll(); return state(); }
+    if (op=="checkpoint") { checkpoint_draft();return state(); }
     if (op=="devices") { refresh_devices(); return state(); }
     if (op=="close") { return close(request); }
     if (op=="device") {
@@ -372,10 +403,40 @@ Json Model::dispatch(const Json& request) {
         next_device_=index; return close(request);
     }
     if (deferred_close_||session_->close_status().state!=CloseState::open) { throw std::runtime_error("Finish or cancel closing first"); }
+    if(op=="recovery_input") {
+        if(request.value("clear",false)){input_recovery_.reset();return Json::object();}
+        const auto doc=session_->current();
+        if(!doc||text(request,"id")!=doc->id()||!request.at("revision").is_number_unsigned()||request.at("revision").get<std::uint64_t>()!=editor().snapshot()->revision())throw std::invalid_argument("Input belongs to an earlier draft");
+        auto profile=editor().working();profile.configuration=configuration(request.at("work"));validate_profile(profile);
+        input_recovery_=std::move(profile);input_profile_id_=doc->id();input_revision_=editor().snapshot()->revision();
+        return Json::object();
+    }
     if (op=="preferences") {
-        const auto value=request.at("closeToTray").get<bool>();
-        detail::write_file(settings_path_,Json{{"version",1},{"eqEnabled",eq_enabled_},{"closeToTray",value}}.dump());
-        close_to_tray_=value;return state();
+        if(!request.contains("closeToTray")&&!request.contains("startInTray"))throw std::invalid_argument("Missing preference");
+        const auto close=request.value("closeToTray",close_to_tray_),start=request.value("startInTray",start_in_tray_);
+        detail::write_file(settings_path_,Json{{"version",1},{"eqEnabled",eq_enabled_},{"closeToTray",close},{"startInTray",start}}.dump());
+        close_to_tray_=close;start_in_tray_=start;return state();
+    }
+    if(op=="recovery_keep"||op=="recovery_discard") {
+        const auto id=text(request,"id");
+        const auto found=std::find_if(recoveries_.begin(),recoveries_.end(),[&](const auto& r){return r.at("id")==id;});
+        if(found==recoveries_.end())throw std::invalid_argument("These unsaved edits are no longer available");
+        std::string created;
+        if(op=="recovery_keep") {
+            if(found->contains("createdId"))created=found->at("createdId").get<std::string>();
+            else {
+                auto name=found->at("name").get<std::string>();
+                if(name.size()>240) { std::size_t end=240;while((static_cast<unsigned char>(name[end])&0xc0)==0x80)--end;name.resize(end); }
+                auto profile=parse_profile(found->at("text").get<std::string>());profile.configuration.bypass=false;
+                created=library_.create(name+" (recovered)",std::move(profile)).id;
+                (*found)["createdId"]=created;
+                // A retry after a cleanup failure reuses the already-created copy.
+                checkpoint_draft();
+            }
+        }
+        const auto before=recoveries_;recoveries_.erase(found);
+        try { checkpoint_draft(); } catch(...) { recoveries_=before;throw; }
+        auto result=state();if(!created.empty())result["createdProfileId"]=created;return result;
     }
     if (op=="profile_preview") {
         // Saved library thumbnails are requested on demand. The selected
@@ -423,7 +484,7 @@ Json Model::dispatch(const Json& request) {
         auto result=state(); result["createdProfileId"]=created.id; return result;
     }
     if (op=="eq") { set_eq_enabled(request.at("enabled").get<bool>()); }
-    else if (op=="edit") { if (editor().replace(configuration(request.at("work")))) { preview(); } }
+    else if (op=="edit") { if (editor().replace(configuration(request.at("work")))) { preview(); } input_recovery_.reset(); }
     else if (op=="begin") { editor().begin_edit(); }
     else if (op=="end") { editor().end_edit(); }
     else if (op=="undo") { if (editor().undo()) { preview(); } }
@@ -465,7 +526,10 @@ Json Model::state(bool include_document) {
         result["devices"].push_back({{"id",utf8(d.id)},{"name",d.name},{"channels",d.channels},{"rate",d.rate},{"mask",d.mask},{"available",d.available},{"state",d.state},{"running",d.contour_running},
             {"connection",{{"checking",connection.busy},{"confirmed",connection.confirmed},{"detail",connection.detail}}}});
     }
-    result["eqEnabled"]=eq_enabled_; result["masterIssues"]=master_issues_;result["closeToTray"]=close_to_tray_;
+    result["eqEnabled"]=eq_enabled_; result["masterIssues"]=master_issues_;result["closeToTray"]=close_to_tray_;result["startInTray"]=start_in_tray_;
+    result["recoveries"]=Json::array();
+    for(const auto& r:recoveries_)result["recoveries"].push_back({{"id",r.at("id")},{"name",r.at("name")},{"device",r.at("device")}});
+    result["recoveryWarning"]=recovery_warning_;
     result["profiles"]=Json::array();
     for (const auto& p:library_.entries()) {
         Json used=Json::array();

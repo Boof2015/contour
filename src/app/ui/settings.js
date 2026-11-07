@@ -2,6 +2,17 @@
 const setupReports=new Map();
 const setupCache=new Map();
 let scanQueue=[],scanStarting=false,setupOperation=null,pendingSetup=null,inventoryRefreshing=false,engineSetup=null;
+let STARTUP=null,startupBusy=false;
+function startupPreference(){
+  return `<div><h2>Start with Windows</h2><p>${esc(STARTUP?.note||'Checking Windows startup settings…')}</p></div><button class="sw${STARTUP?.enabled?' on':''}" data-start-with-windows aria-label="Start with Windows" aria-pressed="${!!STARTUP?.enabled}" ${startupBusy||!STARTUP?.available?'disabled':''}></button>`;
+}
+async function startupSettings(enabled){
+  if(startupBusy)return;
+  startupBusy=true;const update=()=>{const row=$('#startupPreference');if(row)row.innerHTML=startupPreference();};update();
+  try{STARTUP=await rpc('startup',enabled===undefined?{action:'state'}:{action:'set',enabled});}
+  catch(error){toast(error.message);if(!STARTUP)STARTUP={available:false,note:'Couldn’t read Windows startup settings. Reopen General to try again.'};}
+  finally{startupBusy=false;update();}
+}
 const setupDevice=()=>APP.devices.find(d=>d.id===S.settingsDevice);
 const setupDeviceStamp=d=>JSON.stringify([d.available,d.state,d.channels,d.rate,d.mask]);
 const inspectingDevice=id=>(SETUP.busy||scanStarting)&&SETUP.endpoint===id;
@@ -74,7 +85,12 @@ function settingsView(){
   return `<div class="body settings-body"><aside class="side settings-nav"><button class="settings-back" data-act="back-eq">${I('back')}Back to EQ</button><nav aria-label="Settings"><button data-settings-tab="outputs" class="${S.settingsTab==='outputs'?'sel':''}">${I('speaker')}Outputs</button><button data-settings-tab="general" class="${S.settingsTab==='general'?'sel':''}">${I('settings')}General</button></nav></aside><main class="settings-main" id="settingsMain">${S.settingsTab==='general'?generalSettings():outputSettings()}</main></div>`;
 }
 function generalSettings(){
-  return `<div class="settings-head"><h1>General</h1></div><section class="preference-row"><div><h2>Appearance</h2><p>Choose how Contour looks.</p></div><div class="theme-options" role="group" aria-label="Appearance">${['dark','light'].map(theme=>`<button data-theme-choice="${theme}" aria-pressed="${S.theme===theme}">${theme==='dark'?'Dark':'Light'}</button>`).join('')}</div></section><section class="preference-row"><div><h2>Close window to tray</h2><p>Keep Contour and your current edits available in the notification area. Right-click its icon and choose Quit to exit.</p></div><button class="sw${APP.closeToTray===false?'':' on'}" data-close-to-tray aria-label="Close window to tray" aria-pressed="${APP.closeToTray!==false}"></button></section>`;
+  return `<div class="settings-head"><h1>General</h1></div>
+    <section class="preference-row"><div><h2>Appearance</h2><p>Choose how Contour looks.</p></div><div class="theme-options" role="group" aria-label="Appearance">${['dark','light'].map(theme=>`<button data-theme-choice="${theme}" aria-pressed="${S.theme===theme}">${theme==='dark'?'Dark':'Light'}</button>`).join('')}</div></section>
+    <section class="preference-row" id="startupPreference">${startupPreference()}</section>
+    <section class="preference-row"><div><h2>Start in tray</h2><p>Open in the notification area when Contour starts. Launch Contour again to open its window.</p></div><button class="sw${APP.startInTray?' on':''}" data-start-in-tray aria-label="Start in tray" aria-pressed="${!!APP.startInTray}"></button></section>
+    <section class="preference-row"><div><h2>Close window to tray</h2><p>Keep Contour and your current edits available in the notification area. Right-click its icon and choose Quit to exit.</p></div><button class="sw${APP.closeToTray===false?'':' on'}" data-close-to-tray aria-label="Close window to tray" aria-pressed="${APP.closeToTray!==false}"></button></section>
+    <p class="settings-notice">Saved EQ continues to work when Contour is closed. After a restart or sign-out, unsaved edits are available to recover in Profiles.</p>${APP.recoveryWarning?`<p class="settings-notice warn" role="status">Couldn’t keep a recovery copy: ${esc(APP.recoveryWarning)}</p>`:''}`;
 }
 function engineUpdateView(){
   const operation=['Update','RecoverUpdate'].includes(setupOperation?.action)?setupOperation:null;
@@ -156,6 +172,7 @@ async function openSettings(tab='outputs',endpoint=null){
   document.activeElement?.blur();endGesture();await flush();
   S.pop=null;S.view='settings';S.settingsTab=tab;S.settingsDevice=endpoint;S.setupConfirm=null;render();
   if(tab==='outputs')refreshDevices();
+  else startupSettings();
 }
 async function refreshDevices(force=false){
   if(setupOperation||inventoryRefreshing)return;
@@ -271,8 +288,10 @@ function setupAct(action){
   else if(action==='open-eq'){S.openEditorDevice=d.id;command('device',{id:d.id},true);}
 }
 document.addEventListener('click',e=>{
+  if(e.target.closest('[data-start-with-windows]')){if(STARTUP?.available)startupSettings(!STARTUP.enabled);return;}
+  if(e.target.closest('[data-start-in-tray]')){command('preferences',{startInTray:!APP.startInTray},true);return;}
   if(e.target.closest('[data-close-to-tray]')){command('preferences',{closeToTray:APP.closeToTray===false},true);return;}
-  const tab=e.target.closest('[data-settings-tab]');if(tab){S.settingsTab=tab.dataset.settingsTab;render();if(S.settingsTab==='outputs')scanNext();return;}
+  const tab=e.target.closest('[data-settings-tab]');if(tab){S.settingsTab=tab.dataset.settingsTab;render();if(S.settingsTab==='outputs')scanNext();else startupSettings();return;}
   const theme=e.target.closest('[data-theme-choice]');if(theme){S.theme=theme.dataset.themeChoice;localStorage.setItem('theme',S.theme);render();syncWindowTheme();return;}
   const engine=e.target.closest('[data-engine-act]');if(engine){engineAct(engine.dataset.engineAct);return;}
   const action=e.target.closest('[data-setup-act]');if(action){setupAct(action.dataset.setupAct);return;}

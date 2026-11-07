@@ -535,6 +535,12 @@ ul { margin: 0; padding: 0; list-style: none; }
 .theme-options button { padding:8px 20px; border-radius:6px; color:var(--text-2); }
 .theme-options [aria-pressed="true"] { background:var(--ctl); color:var(--text); }
 .settings-message { padding:18px; margin-bottom:24px; border:1px solid var(--ctl); border-radius:8px; }.settings-message p { color:var(--text-2); }
+.preference-row .sw:disabled { opacity:.45; }
+.recovery-list { flex:none; max-height:40%; overflow:auto; padding:16px; margin-bottom:18px; background:var(--side); border-radius:12px; }
+.recovery-list h3 { margin:0 0 6px; font-size:14px; }.recovery-list p { margin:0 0 14px; color:var(--text-2); }
+.recovery-row { display:flex; align-items:center; gap:10px; padding:10px 0; }
+.recovery-row > span { flex:1; min-width:0; }.recovery-row strong,.recovery-row small { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.recovery-row small { margin-top:3px; color:var(--text-3); }
 @media(max-width:1100px) { .settings-main { padding:24px 20px; }.device-columns,.device-row { grid-template-columns:minmax(180px,1fr) 100px 110px 70px; gap:10px; }.device-row { padding:16px 10px; } }
 @media (prefers-reduced-motion: reduce) {
   .pop, .dlg, .toast { animation:none; }

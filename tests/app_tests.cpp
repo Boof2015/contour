@@ -1,4 +1,5 @@
 #include "model.h"
+#include "startup.h"
 #include "control_test_support.h"
 #include "test_support.h"
 #include <contour/peq_import.h>
@@ -222,17 +223,81 @@ void profile_management(const std::filesystem::path& path){
     require(!active["canDelete"].get<bool>() && active["usedBy"][0]["id"]==utf8(endpoint_id),"Assigned usage was omitted from the library UI");
 }
 void tray_preferences(const std::filesystem::path& path){
-    Fixture f(path);require(f.model->close_to_tray(),"Tray should be the default close behavior");
+    Fixture f(path);require(f.model->close_to_tray()&&!f.model->start_in_tray(),"Unexpected startup/close defaults");
     auto work=f.work();work["layers"][0]["gain"]=-4;f.edit(work);f.consume();
     const auto before=f.model->state()["editor"];const auto live=f.live->writes,saved=f.saved->writes;const auto disk=bytes(path);
-    const auto state=f.model->dispatch({{"op","preferences"},{"closeToTray",false}});
+    const auto state=f.model->dispatch({{"op","preferences"},{"closeToTray",false},{"startInTray",true}});
     require(state["closeToTray"]==false&&!f.model->close_to_tray(),"Close preference did not update");
     require(state["editor"]==before&&bytes(path)==disk&&f.live->writes==live&&f.saved->writes==saved,"Close preference changed the draft or device EQ");
     f.model->dispatch({{"op","eq"},{"enabled",false}});f.consume();
     f.model.reset();f.model=std::make_unique<Model>(path,std::vector<Device>{{endpoint_id,"Fixture output",2,48000,3,true}},f.enumerator.Get());
-    require(!f.model->close_to_tray()&&f.model->state()["eqEnabled"]==false,"EQ toggle overwrote tray preference or restart lost it");
+    require(!f.model->close_to_tray()&&f.model->start_in_tray()&&f.model->state()["eqEnabled"]==false,"EQ toggle overwrote tray preference or restart lost it");
     f.model->dispatch({{"op","preferences"},{"closeToTray",true}});
     require(f.model->state()["eqEnabled"]==false,"Tray preference re-enabled global EQ");
+    require(f.model->start_in_tray(),"Partial preference update reset start-in-tray");
+}
+void startup_registration(){
+    const auto key=L"Software\\ContourTests\\Startup-"+std::to_wstring(GetCurrentProcessId())+L"-"+std::to_wstring(GetTickCount64());
+    struct Root { HKEY value=nullptr;std::wstring path;~Root(){if(value)RegCloseKey(value);RegDeleteTreeW(HKEY_CURRENT_USER,path.c_str());} } root{nullptr,key};
+    require(RegCreateKeyExW(HKEY_CURRENT_USER,key.c_str(),0,nullptr,0,KEY_ALL_ACCESS,nullptr,&root.value,nullptr)==ERROR_SUCCESS,"Create isolated startup registry root");
+    StartupRegistration startup(L"C:\\A folder with spaces\\Contour.exe",root.value);
+    require(!startup.enabled()&&!startup.registered(),"Startup default was enabled");startup.set_enabled(true);
+    require(startup.enabled(),"Startup registration failed");
+    constexpr auto run=L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+    wchar_t value[512]{};DWORD size=sizeof(value);
+    require(RegGetValueW(root.value,run,L"Contour",RRF_RT_REG_SZ,nullptr,value,&size)==ERROR_SUCCESS&&std::wstring_view(value)==L"\"C:\\A folder with spaces\\Contour.exe\" --startup","Startup path was not safely quoted");
+    HKEY opened=nullptr;require(RegOpenKeyExW(root.value,run,0,KEY_SET_VALUE,&opened)==ERROR_SUCCESS,"Open fixture");
+    const wchar_t other[]=L"untouched";RegSetValueExW(opened,L"OtherApp",0,REG_SZ,reinterpret_cast<const BYTE*>(other),sizeof(other));RegCloseKey(opened);
+    StartupRegistration moved(L"C:\\New folder\\contour.exe",root.value);
+    require(!moved.enabled()&&moved.registered(),"Moved executable looked correctly registered");moved.set_enabled(true);
+    require(moved.enabled()&&!startup.enabled(),"Explicit enable did not repair stale path");moved.set_enabled(false);moved.set_enabled(false);
+    size=sizeof(value);require(!moved.registered()&&RegGetValueW(root.value,run,L"OtherApp",RRF_RT_REG_SZ,nullptr,value,&size)==ERROR_SUCCESS,"Disabling startup changed another entry");
+    StartupRegistration long_path(std::filesystem::path(L"C:\\"+std::wstring(270,L'a')+L"\\contour.exe"),root.value);
+    bool rejected=false;try{long_path.set_enabled(true);}catch(const std::exception&){rejected=true;}require(rejected&&!moved.registered(),"Oversized Run command was written");
+    const std::array<std::wstring_view,3> options{L"--startup",L"--data-dir",L"C:\\test data"};
+    const auto launch=parse_launch_options(options);require(launch.startup&&launch.data==L"C:\\test data","Startup launch options not parsed");
+    const std::array<std::wstring_view,2> invalid{L"--startup",L"--startup"};rejected=false;
+    try{parse_launch_options(invalid);}catch(const std::invalid_argument&){rejected=true;}require(rejected,"Duplicate launch flags accepted");
+}
+void draft_recovery(const std::filesystem::path& path){
+    Fixture f(path);auto work=f.work();work["layers"][0]["gain"]=-6.5;f.edit(work);f.consume();
+    const auto disk=bytes(path);const auto live=f.live->writes,saved=f.saved->writes;
+    const auto before=f.model->state()["editor"];
+    f.model->checkpoint_draft();
+    require(bytes(path)==disk&&f.model->state()["editor"]==before&&f.live->writes==live&&f.saved->writes==saved,"Recovery checkpoint saved/applied the draft");
+    const auto reopen=[&]{f.model.reset();f.model=std::make_unique<Model>(path,std::vector<Device>{{endpoint_id,"Fixture output",2,48000,3,true}},f.enumerator.Get());};
+    reopen();auto state=f.model->state();
+    require(state["recoveries"].size()==1&&!state["editor"]["dirty"].get<bool>()&&state["editor"]["work"]["layers"][0]["gain"]==0,"Interrupted session lost recovery or automatically restored playback");
+    const auto recovered_id=state["recoveries"][0]["id"];
+    // Leave an older recovery pending while creating a new draft this session.
+    auto newer=f.work();newer["layers"][0]["gain"]=-3;f.edit(newer);f.consume();f.model->checkpoint_draft();
+    reopen();state=f.model->state();require(state["recoveries"].size()==2,"New edits overwrote an unresolved recovery");
+    const auto current=state["editor"];const auto lw=f.live->writes,sw=f.saved->writes;
+    const auto kept=f.model->dispatch({{"op","recovery_keep"},{"id",recovered_id}});
+    const auto profile=ProfileLibrary(path).get(kept["createdProfileId"].get<std::string>());
+    require(profile.saved.configuration.layers[0].gain_db==-6.5&&kept["editor"]==current&&f.live->writes==lw&&f.saved->writes==sw,"Keep recovery did not preserve values or changed current audio");
+    require(kept["recoveries"].size()==1,"Keep recovery did not clear its pending copy");
+    f.model->dispatch({{"op","recovery_discard"},{"id",kept["recoveries"][0]["id"]}});reopen();
+    require(f.model->state()["recoveries"].empty(),"Resolved recovery appeared again");
+    f.edit(work);f.consume();f.model->checkpoint_draft();
+    f.model->dispatch({{"op","revert"}});f.model->checkpoint_draft();reopen();
+    require(f.model->state()["recoveries"].empty(),"Reverted draft was resurrected");
+    f.edit(work);f.consume();f.model->checkpoint_draft();
+    f.model->dispatch({{"op","close"},{"choice","discard"}});f.consume();
+    require(f.model->closed(),"Normal discard close did not finish");f.model->checkpoint_draft();reopen();
+    require(f.model->state()["recoveries"].empty(),"Normal Quit with Don't save left a recovery");
+    const auto clean=f.model->state()["editor"];auto typed=f.work();typed["layers"][0]["gain"]=-12.3;
+    const auto writes=f.live->writes;
+    f.model->dispatch({{"op","recovery_input"},{"id",clean["id"]},{"revision",clean["revision"]},{"work",typed}});f.model->checkpoint_draft();
+    require(f.model->state()["editor"]==clean&&f.live->writes==writes,"Typing recovery committed or auditioned the field");
+    f.model->dispatch({{"op","recovery_input"},{"clear",true}});f.model->checkpoint_draft();reopen();
+    require(f.model->state()["recoveries"].empty(),"Cancelled field entry was recovered");
+    const auto new_clean=f.model->state()["editor"];
+    f.model->dispatch({{"op","recovery_input"},{"id",new_clean["id"]},{"revision",new_clean["revision"]},{"work",typed}});f.model->checkpoint_draft();reopen();
+    const auto pending=f.model->state()["recoveries"];
+    require(pending.size()==1,"Uncommitted valid field was not checkpointed");
+    const auto kept_input=f.model->dispatch({{"op","recovery_keep"},{"id",pending[0]["id"]}});
+    require(ProfileLibrary(path).get(kept_input["createdProfileId"].get<std::string>()).saved.configuration.layers[0].gain_db==-12.3,"Focused field recovery lost its value");
 }
 void idle_edits(const std::filesystem::path& path){
     Fixture f(path);f.idle();
@@ -351,6 +416,8 @@ int wmain(int argc,wchar_t** argv){
     suite.run("profile switch decisions, duplicate and strict bridge allowlist",[&]{profile_guard(dir/L"profiles.library");});
     suite.run("profile export/import round trip, independent global EQ, deletion guards and no device writes",[&]{profile_management(dir/L"management.library");});
     suite.run("tray preference is durable and independent of profile, draft and global EQ",[&]{tray_preferences(dir/L"tray.library");});
+    suite.run("isolated Windows startup registration quotes paths, repairs moves and preserves unrelated entries",startup_registration);
+    suite.run("recovery survives interrupted sessions without changing saved profiles or audio; normal decisions clear it",[&]{draft_recovery(dir/L"recovery.library");});
     suite.run("global EQ bypass preserves profiles/history and survives selection, save, restart and audio idle",[&]{master_eq(dir/L"master.library");});
     suite.run("idle edits coalesce, Save persists without playback, and close delivers automatically on resume",[&]{idle_edits(dir/L"idle.library");});
     suite.run("global EQ reaches assigned and unassigned outputs, preserves drafts and reports retryable partial failure",[&]{master_devices(dir/L"master-devices.library");});

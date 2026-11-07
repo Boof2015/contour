@@ -1,6 +1,7 @@
 #include "model.h"
 #include "setup.h"
 #include "tray.h"
+#include "startup.h"
 #include "../eq/file_storage.h"
 #include <WebView2.h>
 #include <wrl.h>
@@ -24,11 +25,13 @@ struct App {
     std::unique_ptr<contour::app::Model> model;
     std::unique_ptr<contour::app::DeviceSetup> setup;
     std::unique_ptr<contour::app::TrayHost> tray;
+    std::unique_ptr<contour::app::StartupRegistration> startup;
     UINT activate_message=0;
     ComPtr<ICoreWebView2Controller> controller;
     ComPtr<ICoreWebView2> view;
     std::filesystem::path assets,data;
     bool ready=false,custom_frame=false;
+    bool start_hidden=false,isolated=false,session_ending=false;
     RECT view_bounds{-1,-1,-1,-1};
     ULONGLONG caption_click=0; POINT caption_point{};
     Json sent_window_state;
@@ -36,6 +39,7 @@ struct App {
     struct ExportJob { Json request_id; std::string text; std::wstring filename; bool filters=false; };
     std::optional<ExportJob> export_job;
     void show_editor() {
+        start_hidden=false;
         if(tray)tray->hide();
         if(controller)controller->put_IsVisible(TRUE);
         ShowWindow(window,IsIconic(window)?SW_RESTORE:SW_SHOW);SetForegroundWindow(window);
@@ -101,6 +105,7 @@ struct App {
         if (!EqualRect(&rect,&view_bounds) && SUCCEEDED(controller->put_Bounds(rect))) { view_bounds=rect; }
     }
     void fail(const std::string& error) {
+        show_editor();
         MessageBoxW(window,contour::app::wide(error).c_str(),L"Contour",MB_OK|MB_ICONERROR);
     }
     void message(ICoreWebView2WebMessageReceivedEventArgs* args) noexcept {
@@ -113,6 +118,7 @@ struct App {
             if (body.size()>2*1024*1024) { throw std::invalid_argument("Editor message is too large"); }
             const auto request=Json::parse(contour::app::utf8(body)); request_id=request.at("requestId");
             if (!request_id.is_number_unsigned()) { throw std::invalid_argument("Invalid request identity"); }
+            if(session_ending)throw std::runtime_error("Windows is ending this session");
             if (export_job && request.at("op")!="state" && request.at("op")!="inspect") {
                 throw std::runtime_error("Finish or cancel the export first");
             }
@@ -178,6 +184,19 @@ struct App {
                 model->suspend_connections(setup->mutating());
                 send({{"requestId",request_id},{"ok",true},{"data",result}}); return;
             }
+            if(request.at("op")=="startup") {
+                const auto action=request.at("action").get<std::string>();
+                if(action!="state"&&action!="set")throw std::invalid_argument("Unknown startup action");
+                if(action=="set") {
+                    if(isolated)throw std::runtime_error("Windows startup is unavailable for an isolated test instance");
+                    startup->set_enabled(request.at("enabled").get<bool>());
+                }
+                const bool enabled=!isolated&&startup->enabled();
+                const std::string note=isolated?"Windows startup is unavailable for this isolated test instance.":
+                    !enabled&&startup->registered()?"Startup currently points to another copy of Contour. Enable this setting to use this copy.":
+                    "Open Contour when you sign in. Windows can also disable it in Startup apps.";
+                send({{"requestId",request_id},{"ok",true},{"data",{{"available",!isolated},{"enabled",enabled},{"note",note}}}});return;
+            }
             if (setup->mutating() && request.at("op")!="state" && request.at("op")!="inspect") {
                 throw std::runtime_error("Wait for installation or removal to finish");
             }
@@ -192,6 +211,7 @@ struct App {
                 return;
             }
             auto result=model->dispatch(request); ready=true;
+            if(request.at("op")!="edit"&&request.at("op")!="begin"&&request.at("op")!="end"&&request.at("op")!="recovery_input")model->checkpoint_draft();
             send({{"requestId",request_id},{"ok",true},{"data",std::move(result)}});
             if (request.at("op")=="state") { send_window_state(true); }
             if (model->closed()) { DestroyWindow(window); }
@@ -211,6 +231,8 @@ struct App {
                         controller=control; controller->get_CoreWebView2(&view); resize();
                         tray=std::make_unique<contour::app::TrayHost>(window,assets,[this](const Json& request){tray_action(request);});
                         tray->initialize(shared_environment.Get());
+                        if(start_hidden&&tray->installed())controller->put_IsVisible(FALSE);
+                        else if(start_hidden)show_editor();
                         apply_background();
                         ComPtr<ICoreWebView2Settings> settings; view->get_Settings(&settings);
                         settings->put_AreDefaultContextMenusEnabled(FALSE); settings->put_AreDevToolsEnabled(FALSE);
@@ -320,6 +342,7 @@ LRESULT CALLBACK window_proc(HWND window,UINT message,WPARAM w,LPARAM l) {
         SetWindowPos(window,nullptr,rect->left,rect->top,rect->right-rect->left,rect->bottom-rect->top,SWP_NOZORDER|SWP_NOACTIVATE); return 0;
     }
     case WM_TIMER:
+        if(app->session_ending)return 0;
         if (app->setup->poll() && app->ready) {
             const auto& report=app->setup->state();
             app->model->suspend_connections(app->setup->mutating());
@@ -329,8 +352,28 @@ LRESULT CALLBACK window_proc(HWND window,UINT message,WPARAM w,LPARAM l) {
             app->send({{"event","setup"},{"data",report}});
         }
         if (app->ready) {
-            try { app->model->poll(); app->send({{"event","status"},{"data",app->model->state(false)}}); if (app->model->closed()) { DestroyWindow(window); } }
+            try { app->model->poll(); app->send({{"event","status"},{"data",app->model->state(false)}}); if (app->model->closed()) { app->model->checkpoint_draft();DestroyWindow(window); } }
             catch (const std::exception& e) { app->send({{"event","error"},{"error",e.what()}}); }
+        }
+        return 0;
+    case WM_QUERYENDSESSION:
+        ShutdownBlockReasonDestroy(window);
+        // Recovery stays separate from Save and does not wait for an audio
+        // endpoint. Only a setup transaction or failed recovery write blocks
+        // an ordinary shutdown; critical termination is never held up.
+        if(app->setup->mutating()&&!(l&ENDSESSION_CRITICAL)) {
+            ShutdownBlockReasonCreate(window,L"Contour is finishing an audio engine installation or removal.");return FALSE;
+        }
+        try { app->model->checkpoint_draft(); }
+        catch(...) { if(!(l&ENDSESSION_CRITICAL)){ShutdownBlockReasonCreate(window,L"Contour could not keep a recovery copy of your unsaved edits.");return FALSE;} }
+        if(app->ready)app->send({{"event","session-ending"}});
+        return TRUE;
+    case WM_ENDSESSION:
+        ShutdownBlockReasonDestroy(window);
+        if(w) {
+            app->session_ending=true;
+            try { app->model->checkpoint_draft(); } catch(...) {}
+            DestroyWindow(window);
         }
         return 0;
     case WM_CLOSE:
@@ -351,7 +394,7 @@ LRESULT CALLBACK window_proc(HWND window,UINT message,WPARAM w,LPARAM l) {
                     const auto answer=MessageBoxW(window,L"Save your changes before closing?",L"Contour",MB_YESNOCANCEL|MB_ICONQUESTION);
                     state=app->model->dispatch({{"op","close"},{"choice",answer==IDYES ? "save" : answer==IDNO ? "discard" : "cancel"}});
                 }
-                if (app->model->closed()) { DestroyWindow(window); }
+                if (app->model->closed()) { app->model->checkpoint_draft();DestroyWindow(window); }
                 else if (state["closing"]["state"]!="open") {
                     app->fail("The device update has not completed. The editor remains open; reopen the display to retry or explicitly leave the update pending.");
                     if (app->view) { app->view->Reload(); }
@@ -380,9 +423,12 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int show) {
         if (FAILED(SHGetKnownFolderPath(FOLDERID_LocalAppData,0,nullptr,&local))) { throw std::runtime_error("Cannot find local application storage"); }
         app.data=std::filesystem::path(local)/L"Contour"; CoTaskMemFree(local);
         int count=0; auto** args=CommandLineToArgvW(GetCommandLineW(),&count);
-        if (count==3 && std::wstring_view(args[1])==L"--data-dir") { app.data=std::filesystem::absolute(args[2]); }
-        else if (count!=1) { LocalFree(args); throw std::invalid_argument("Usage: contour.exe [--data-dir directory]"); }
-        LocalFree(args);
+        if(!args)throw std::runtime_error("Cannot read Contour's launch arguments");
+        const std::unique_ptr<void,decltype(&LocalFree)> args_owner(args,LocalFree);
+        std::vector<std::wstring_view> values;for(int i=1;i<count;++i)values.emplace_back(args[i]);
+        const auto launch=contour::app::parse_launch_options(values);
+        if(launch.data){app.data=*launch.data;app.isolated=true;}
+        app.startup=std::make_unique<contour::app::StartupRegistration>(executable);
         std::filesystem::create_directories(app.data);
         // One editor/session per data directory. Reopening the executable
         // restores the existing window, including a draft hidden in the tray.
@@ -396,8 +442,9 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int show) {
         const auto mutex_error=GetLastError();
         const std::unique_ptr<void,decltype(&CloseHandle)> instance_lock(mutex,CloseHandle);
         if(!mutex)throw std::runtime_error("Cannot open the Contour instance lock");
-        if(mutex_error==ERROR_ALREADY_EXISTS){PostMessageW(HWND_BROADCAST,app.activate_message,0,0);CoUninitialize();return 0;}
+        if(mutex_error==ERROR_ALREADY_EXISTS){if(!launch.startup)PostMessageW(HWND_BROADCAST,app.activate_message,0,0);CoUninitialize();return 0;}
         app.model=std::make_unique<contour::app::Model>(app.data/L"profiles.contour-library",contour::app::enumerate_devices());
+        app.start_hidden=app.model->start_in_tray();
         WNDCLASSW cls{}; cls.lpfnWndProc=window_proc; cls.hInstance=instance; cls.lpszClassName=L"ContourEditor";
         cls.hCursor=LoadCursorW(nullptr,IDC_ARROW); cls.hbrBackground=static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
         RegisterClassW(&cls);
@@ -407,7 +454,8 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int show) {
             MulDiv(1400,static_cast<int>(dpi),96),MulDiv(900,static_cast<int>(dpi),96),nullptr,nullptr,instance,&app);
         if (!app.window) { throw std::runtime_error("Cannot create the Contour window"); }
         BOOL dark=TRUE; DwmSetWindowAttribute(app.window,20,&dark,sizeof(dark));
-        ShowWindow(app.window,show); app.initialize(); SetTimer(app.window,1,200,nullptr);
+        if(!app.start_hidden)ShowWindow(app.window,show);
+        app.initialize(); SetTimer(app.window,1,200,nullptr);
         MSG message{}; while (GetMessageW(&message,nullptr,0,0)>0) { TranslateMessage(&message); DispatchMessageW(&message); }
         app.controller.Reset(); app.view.Reset();
     } catch (const std::exception& e) { MessageBoxW(nullptr,contour::app::wide(e.what()).c_str(),L"Contour",MB_OK|MB_ICONERROR); exit_code=1; }
