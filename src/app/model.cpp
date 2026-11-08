@@ -187,6 +187,11 @@ Model::Model(std::filesystem::path path,std::vector<Device> devices,IMMDeviceEnu
         recoveries_=saved.at("drafts");
     }
     last_checkpoint_=Json{{"version",1},{"drafts",recoveries_}}.dump();
+    for(const auto& entry:library_.entries())observed_profiles_.emplace(entry.id,ObservedProfile{entry.revision,entry.saved});
+    // Saved assignments are durable intent. Reconcile incrementally so a
+    // failed copy survives restart, even if its profile is now used by only
+    // one device after the editor switched to another profile.
+    for(const auto& a:library_.assignments())assignment_checks_.push_back(a.endpoint_id);
     bind(0);
 }
 void Model::checkpoint_draft() {
@@ -210,12 +215,17 @@ void Model::refresh_devices() {
     const auto selected=selected_device(); auto devices=enumerate_devices();
     auto it=std::find_if(devices.begin(),devices.end(),[&](const auto& d){return d.id==selected.id;});
     if (it==devices.end()) { auto missing=selected; missing.available=false; missing.state=DEVICE_STATE_NOTPRESENT; devices.push_back(std::move(missing)); it=devices.end()-1; }
+    for(const auto& d:devices) {
+        const auto* old=find_device(d.id);
+        if(d.available&&(!old||!old->available||old->channels!=d.channels||old->rate!=d.rate)&&library_.assignment(d.id)&&
+            std::find(assignment_checks_.begin(),assignment_checks_.end(),d.id)==assignment_checks_.end())assignment_checks_.push_back(d.id);
+    }
     device_=static_cast<std::size_t>(it-devices.begin()); devices_=std::move(devices);
 }
 void Model::check_connection(const std::wstring& endpoint) {
     if (connection_ && !connections_suspended_) {
         const auto* device=find_device(endpoint);
-        if(device && device->available)connection_->request(endpoint,true);
+        if((device&&device->available)||library_.assignment(endpoint))connection_->request(endpoint,true);
     }
 }
 void Model::suspend_connections(bool value) {
@@ -239,6 +249,7 @@ void Model::set_eq_enabled(bool enabled) {
         try {
             MasterUpdate update;update.id=assignment.endpoint_id;
             update.assigned=std::make_unique<ProfileDeviceSession>(library_,assignment.endpoint_id,enumerator_.Get(),!enabled);
+            update.profile_revision=library_.get(assignment.profile_id).revision;
             apply(*update.assigned,assignment.endpoint_id);
             if(update.assigned->needs_connection()){check_connection(update.id);master_updates_.push_back(std::move(update));}
         }
@@ -282,8 +293,18 @@ void Model::poll_master_updates() {
         EndpointState endpoint=EndpointState::unavailable;
         try {
             if(update.assigned) {
+                const auto current=update.assigned->current();
+                const auto assignment=library_.assignment(update.id);
+                if(!assignment||!current||assignment->profile_id!=current->id()) {it=master_updates_.erase(it);continue;}
+                const auto revision=library_.get(current->id()).revision;
+                if(update.profile_revision&&revision!=update.profile_revision) {
+                    update.assigned=std::make_unique<ProfileDeviceSession>(library_,update.id,enumerator_.Get(),!eq_enabled_);
+                    update.assigned->synchronize();
+                }
+                update.profile_revision=revision;
                 const auto& s=update.assigned->deliver_pending();endpoint=s.endpoint.state;
                 done=!update.assigned->needs_connection();
+                if(update.profile_change&&s.copy==DeviceCopyState::current&&endpoint==EndpointState::unavailable)done=true;
                 failure=s.copy==DeviceCopyState::failed?s.copy_detail:s.preview_detail;
             } else {
                 auto& session=*update.endpoint;const auto& s=session.refresh();endpoint=s.state;
@@ -314,6 +335,56 @@ void Model::poll_master_updates() {
         ++it;
     }
 }
+void Model::queue_profile_update(const std::wstring& endpoint) {
+    master_updates_.erase(std::remove_if(master_updates_.begin(),master_updates_.end(),[&](const auto& u){return u.id==endpoint;}),master_updates_.end());
+    master_issues_.erase(std::remove_if(master_issues_.begin(),master_issues_.end(),[&](const auto& e){return e.at("device")==utf8(endpoint);}),master_issues_.end());
+    try {
+        MasterUpdate update;update.id=endpoint;update.profile_change=true;
+        update.assigned=std::make_unique<ProfileDeviceSession>(library_,endpoint,enumerator_.Get(),!eq_enabled_);
+        if(!update.assigned->current())return;
+        // Remembered profile choices outlive uninstall. Saving a profile must
+        // not try to reinstall Contour or hold Quit open for that device.
+        if(update.assigned->refresh().endpoint.state==EndpointState::not_attached)return;
+        update.profile_revision=library_.get(update.assigned->current()->id()).revision;
+        const auto& s=update.assigned->synchronize();
+        const auto failure=s.copy==DeviceCopyState::failed?s.copy_detail:s.preview_detail;
+        if(!failure.empty())master_issues_.push_back({{"device",utf8(endpoint)},{"detail",failure}});
+        if(update.assigned->needs_connection()&&!(s.copy==DeviceCopyState::current&&s.endpoint.state==EndpointState::unavailable)) {
+            check_connection(endpoint);master_updates_.push_back(std::move(update));
+        }
+    } catch(const std::exception& e) {master_issues_.push_back({{"device",utf8(endpoint)},{"detail",e.what()}});}
+}
+void Model::propagate_saved_changes(std::string_view force_profile) {
+    std::vector<std::string> changed;
+    for(const auto& entry:library_.entries()) {
+        const auto previous=observed_profiles_.find(entry.id);
+        if(previous!=observed_profiles_.end()&&previous->second.revision==entry.revision&&entry.id!=force_profile)continue;
+        if(entry.id==force_profile||(previous!=observed_profiles_.end()&&previous->second.profile!=entry.saved))changed.push_back(entry.id);
+        observed_profiles_[entry.id]={entry.revision,entry.saved};
+    }
+    std::erase_if(observed_profiles_,[&](const auto& item){return std::none_of(library_.entries().begin(),library_.entries().end(),[&](const auto& entry){return entry.id==item.first;});});
+    for(const auto& a:library_.assignments())if(a.endpoint_id!=selected_device().id&&std::find(changed.begin(),changed.end(),a.profile_id)!=changed.end())queue_profile_update(a.endpoint_id);
+}
+void Model::reconcile_assigned_device() {
+    if(assignment_checks_.empty()||GetTickCount64()-last_assignment_check_<2000||session_->close_status().state!=CloseState::open||deferred_close_)return;
+    last_assignment_check_=GetTickCount64();
+    const auto id=assignment_checks_.front();assignment_checks_.pop_front();
+    if(std::any_of(master_updates_.begin(),master_updates_.end(),[&](const auto& u){return u.id==id;}))return;
+    try {
+        if(id==selected_device().id) {
+            if(session_->current()&&!session_->current()->editor()->dirty()) {
+                const auto report=session_->reconcile();
+                if(report.saved==SavedSettingsState::differs)session_->synchronize();
+                else if(report.saved==SavedSettingsState::unavailable)assignment_checks_.push_back(id);
+            }
+        } else {
+            ProfileDeviceSession check(library_,id,enumerator_.Get(),!eq_enabled_);
+            const auto report=check.reconcile();
+            if(report.saved==SavedSettingsState::differs)queue_profile_update(id);
+            else if(report.saved==SavedSettingsState::unavailable)assignment_checks_.push_back(id);
+        }
+    } catch(const std::exception& e) {master_issues_.push_back({{"device",utf8(id)},{"detail",e.what()}});}
+}
 void Model::bind(std::size_t index) {
     if (index>=devices_.size()) { throw std::invalid_argument("Unknown output"); }
     auto next=std::make_unique<ProfileDeviceSession>(library_,devices_[index].id,enumerator_.Get(),!eq_enabled_);
@@ -343,9 +414,12 @@ void Model::poll() {
         try { checkpoint_draft(); } catch(const std::exception& e) { recovery_warning_=e.what();last_checkpoint_time_=GetTickCount64(); }
     }
     if(connections_suspended_)return;
+    propagate_saved_changes();
+    reconcile_assigned_device();
     poll_master_updates();
     if(deferred_close_&&master_updates_.empty()) {
         const auto request=*deferred_close_;deferred_close_.reset();session_->request_close(choice(request));
+        shared_close_started_=GetTickCount64();propagate_saved_changes();
     }
     if(connection_ && session_->needs_connection()) {
         const auto endpoint=session_->refresh().endpoint.state;
@@ -353,7 +427,7 @@ void Model::poll() {
     }
     const auto closing=session_->close_status().state;
     if (closing==CloseState::waiting) { session_->poll_close(); }
-    if (session_->close_status().state==CloseState::ready) { session_->finish_close(); }
+    if (session_->close_status().state==CloseState::ready&&master_updates_.empty()) { session_->finish_close(); }
     if (closed() && next_device_) { bind(*next_device_); if (session_->current()) { session_->synchronize(); } }
     if (session_->close_status().state==CloseState::open) {
         const auto& status=session_->deliver_pending();
@@ -372,7 +446,10 @@ Json Model::close(const Json& request) {
             for(const auto& update:master_updates_)check_connection(update.id);
         }
         else if(action=="leave_pending") {
-            const auto pending=*deferred_close_;deferred_close_.reset();master_updates_.clear();session_->request_close(choice(pending));
+            const auto pending=*deferred_close_;deferred_close_.reset();shared_close_started_=GetTickCount64();session_->request_close(choice(pending));
+            // A Save resolved here can create a newer shared-device update.
+            // Attempt its persisted copy before honoring the pending exit.
+            propagate_saved_changes();master_updates_.clear();
         }
         poll();return state();
     }
@@ -380,9 +457,9 @@ Json Model::close(const Json& request) {
         deferred_close_=request;deferred_close_started_=GetTickCount64();poll();return state();
     }
     if (action=="cancel") { session_->cancel_close(); next_device_.reset(); }
-    else if (action=="retry") { session_->retry_close(); }
-    else if (action=="leave_pending") { session_->finish_close(CloseCompletion::leave_device_pending); }
-    else if (action=="request") { session_->request_close(choice(request)); }
+    else if (action=="retry") { shared_close_started_=GetTickCount64();for(const auto& update:master_updates_)check_connection(update.id);session_->retry_close(); }
+    else if (action=="leave_pending") { master_updates_.clear();session_->finish_close(CloseCompletion::leave_device_pending); }
+    else if (action=="request") { shared_close_started_=GetTickCount64();session_->request_close(choice(request)); }
     else { throw std::invalid_argument("Unknown close operation"); }
     if(session_->needs_connection())check_connection(selected_device().id);
     poll(); return state();
@@ -445,6 +522,33 @@ Json Model::dispatch(const Json& request) {
         return {{"id",entry.id},{"revision",entry.revision},{"channels",entry.saved.channels},
             {"rate",entry.saved.validation_sample_rate},{"work",configuration_json(entry.saved.configuration,entry.saved.validation_sample_rate)}};
     }
+    if(op=="profile_adapt_preview"||op=="profile_adapt") {
+        const auto id=text(request,"id");const auto& entry=library_.get(id);const auto current=session_->current();
+        const bool selected=current&&current->id()==id;
+        const auto draft_revision=selected?Json(current->editor()->snapshot()->revision()):Json{};
+        auto profile=selected?current->editor()->working():entry.saved;
+        if(op=="profile_adapt"&&connection_)refresh_devices();
+        const auto& device=selected_device();
+        if(!device.available||!device.channels||device.channels>32||!device.rate)throw std::invalid_argument("Connect this device before adapting a profile");
+        const Json target={{"id",utf8(device.id)},{"channels",device.channels},{"rate",device.rate},{"mask",device.mask}};
+        if(op=="profile_adapt_preview")return {{"id",id},{"name",entry.name},{"sourceRevision",entry.revision},{"draftRevision",draft_revision},
+            {"sourceChannels",profile.channels},{"target",target},{"work",configuration_json(profile.configuration,device.rate)}};
+        if(request.at("sourceRevision")!=entry.revision||request.at("draftRevision")!=draft_revision||request.at("target")!=target)throw std::invalid_argument("The profile or device changed. Reopen Adapt a copy to review it again.");
+        const auto& targets=request.at("targets");
+        if(!targets.is_array()||targets.size()!=profile.configuration.layers.size())throw std::invalid_argument("Review the channels for every layer");
+        const auto valid_bits=(std::uint64_t{1}<<device.channels)-1;
+        for(std::size_t i=0;i<targets.size();++i) {
+            const bool all=targets[i].at("all").get<bool>();const auto& value=targets[i].at("mask");
+            if(!value.is_number_unsigned())throw std::invalid_argument("Invalid channel selection");
+            const auto mask=value.get<std::uint64_t>();
+            if((all&&mask!=0)||(!all&&(mask==0||(mask&~valid_bits)!=0)))throw std::invalid_argument("Choose destination channels for every layer");
+            profile.configuration.layers[i].channels={all,static_cast<std::uint32_t>(mask)};
+        }
+        profile.channels=device.channels;profile.validation_sample_rate=device.rate;profile.configuration.bypass=false;
+        validate_profile(profile);
+        const auto created=library_.create(text(request,"name"),std::move(profile));
+        auto result=state();result["createdProfileId"]=created.id;return result;
+    }
     if (op=="layer_export") {
         const auto current=session_->current();
         if (!current || current->id()!=text(request,"id") || !request.at("revision").is_number_unsigned() ||
@@ -489,7 +593,7 @@ Json Model::dispatch(const Json& request) {
     else if (op=="end") { editor().end_edit(); }
     else if (op=="undo") { if (editor().undo()) { preview(); } }
     else if (op=="redo") { if (editor().redo()) { preview(); } }
-    else if (op=="save") { session_->save(); inspect(); }
+    else if (op=="save") { session_->save();propagate_saved_changes(session_->current()->id());inspect(); }
     else if (op=="revert") { session_->revert(); inspect(); }
     else if (op=="apply") { session_->synchronize(); inspect(); }
     else if (op=="inspect") { inspect(); }
@@ -516,6 +620,7 @@ Json Model::dispatch(const Json& request) {
         return {{"valid",parsed.layer.has_value()},{"issues",issues},
                 {"layer",parsed.layer ? layer_json(*parsed.layer,editor().working().validation_sample_rate) : Json{}}};
     } else { throw std::invalid_argument("Unknown editor operation"); }
+    propagate_saved_changes();
     if(session_->needs_connection()&&op!="begin"&&op!="end")check_connection(selected_device().id);
     return state(op!="begin" && op!="end");
 }
@@ -536,7 +641,9 @@ Json Model::state(bool include_document) {
         for (const auto& a:library_.assignments()) {
             if (a.profile_id!=p.id) { continue; }
             const auto* device=find_device(a.endpoint_id);
-            used.push_back({{"id",utf8(a.endpoint_id)},{"name",device?device->name:"Disconnected device"},{"available",device && device->available}});
+            const bool pending=std::any_of(master_updates_.begin(),master_updates_.end(),[&](const auto& u){return u.id==a.endpoint_id;})||
+                std::any_of(master_issues_.begin(),master_issues_.end(),[&](const auto& issue){return issue.at("device")==utf8(a.endpoint_id);});
+            used.push_back({{"id",utf8(a.endpoint_id)},{"name",device?device->name:"Disconnected device"},{"available",device && device->available},{"pending",pending}});
         }
         const auto current=session_->current(); const bool selected=current && current->id()==p.id;
         const auto& profile=selected ? current->editor()->working() : p.saved;
@@ -548,6 +655,8 @@ Json Model::state(bool include_document) {
     result["closing"]={{"state",close_name(close_state.state)},{"detail",close_state.detail},{"switching",next_device_.has_value()}};
     if(deferred_close_)result["closing"]={{"state",GetTickCount64()-deferred_close_started_<3500?"waiting":"needs_attention"},
         {"detail","An EQ change on another device has not been confirmed. Retry, keep editing, or leave the update pending."},{"switching",next_device_.has_value()}};
+    else if(close_state.state==CloseState::ready&&!master_updates_.empty())result["closing"]={{"state",GetTickCount64()-shared_close_started_<3500?"waiting":"needs_attention"},
+        {"detail","The profile is saved. Updates on other assigned devices are still pending."},{"switching",next_device_.has_value()}};
     const auto& s=session_->status();
     result["status"]={{"endpoint",endpoint_state_name(s.endpoint.state)},{"detail",s.endpoint.detail},{"copy",s.copy==DeviceCopyState::current ? "current" : s.copy==DeviceCopyState::failed ? "failed" : "pending"},
         {"copyDetail",s.copy_detail},{"previewDetail",s.preview_detail},{"pending",session_->needs_connection()},{"applied",false},{"running","unavailable"},{"saved","not_checked"}};

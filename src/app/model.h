@@ -2,6 +2,7 @@
 #include <contour/profile_device_session.h>
 #include <nlohmann/json.hpp>
 #include "audio_connection.h"
+#include <deque>
 
 namespace contour::app {
 using Json=nlohmann::json;
@@ -45,6 +46,9 @@ private:
     void set_eq_enabled(bool enabled);
     void set_unassigned_eq(const Device& device);
     void poll_master_updates();
+    void propagate_saved_changes(std::string_view force_profile={});
+    void queue_profile_update(const std::wstring& endpoint);
+    void reconcile_assigned_device();
     void bind(std::size_t index);
     void preview();
     void inspect();
@@ -79,9 +83,16 @@ private:
         std::unique_ptr<eq::EndpointSession> endpoint;
         bool persisted=false;
         std::uint64_t last_attempt=0;
+        std::uint64_t profile_revision=0;
+        bool profile_change=false;
     };
     std::vector<MasterUpdate> master_updates_;
     std::optional<Json> deferred_close_;
     std::uint64_t deferred_close_started_=0;
+    std::uint64_t shared_close_started_=0;
+    struct ObservedProfile { std::uint64_t revision;eq::Profile profile; };
+    std::map<std::string,ObservedProfile> observed_profiles_;
+    std::deque<std::wstring> assignment_checks_;
+    std::uint64_t last_assignment_check_=0;
 };
 } // namespace contour::app

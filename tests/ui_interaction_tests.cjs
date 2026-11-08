@@ -19,6 +19,7 @@ const fixture=()=>{
   let engineUpdate=new URL(location.href).searchParams.has('engine-update');
   if(engineUpdate)window.addEventListener('load',()=>openSettings('outputs'));
   if(new URL(location.href).searchParams.has('profiles'))window.addEventListener('load',()=>openProfiles());
+  if(new URL(location.href).searchParams.has('adapt'))window.addEventListener('load',async()=>{await openProfiles();await openAdapt('test-assigned');});
   if(new URL(location.href).searchParams.has('layer-menu'))window.addEventListener('load',()=>{S.pop='layermenu';renderOver();});
   if(new URL(location.href).searchParams.has('general'))window.addEventListener('load',()=>openSettings('general'));
   if(new URL(location.href).searchParams.has('recovery'))state.recoveries=[{id:'recovery-1',name:'My EQ',device:'Offline test output'}];
@@ -32,6 +33,7 @@ const fixture=()=>{
     if(r.op==='window')data={custom:false,maximized:false};
     if(r.op==='edit'){state.editor.work=r.work;state.editor.revision++;state.editor.dirty=true;window.testEdits.push(structuredClone(r.work));}
     if(r.op==='eq')state.eqEnabled=r.enabled;
+    if(r.op==='device'&&window.holdDeviceSwitch)state.closing={state:'waiting',switching:true};
     if(r.op==='preferences'){for(const key of ['startInTray','closeToTray'])if(key in r)state[key]=r[key];}
     if(r.op==='startup'){
       if(r.action==='set'&&window.failStartup){setTimeout(()=>receive({data:{requestId:r.requestId,ok:false,error:'Test startup registration failure'}}),0);return;}
@@ -53,6 +55,14 @@ const fixture=()=>{
       data={id:r.id,revision:profile.revision,channels:profile.channels,rate:44100,work:{layers}};
     }
     if(r.op==='profile_delete')state.profiles=state.profiles.filter(p=>p.id!==r.id);
+    if(r.op==='profile_adapt_preview')data={id:r.id,name:'Surround profile',sourceRevision:1,draftRevision:null,sourceChannels:6,target:{id:'test-output',channels:2,rate:48000,mask:3},work:{layers:[
+      {name:'All',all:true,mask:0,gain:-3,on:true,filters:[filter()]},
+      {name:'Rear pair',all:false,mask:48,gain:-4,on:false,filters:[filter(-2)]},
+      {name:'First channel',all:false,mask:1,gain:0,on:true,filters:[filter(1)]}]}};
+    if(r.op==='profile_adapt'){
+      if(window.failAdapt){setTimeout(()=>receive({data:{requestId:r.requestId,ok:false,error:'The profile or device changed. Reopen Adapt a copy to review it again.'}}),0);return;}
+      state.profiles.push({id:'adapted-copy',name:r.name,channels:2,revision:1,layers:3,filters:3,canDelete:true,usedBy:[]});data={...state,createdProfileId:'adapted-copy'};
+    }
     if(r.op==='profile_import'){state.profiles.push({id:'test-imported',name:r.name,channels:2,revision:1,layers:0,filters:0,canDelete:true,usedBy:[]});data={...state,createdProfileId:'test-imported'};}
     if(r.op==='setup'){
       if(r.action==='Install')installed.add(r.endpoint);
@@ -69,7 +79,7 @@ const fixture=()=>{
     if(!Number.isSafeInteger(r.requestId))throw Error('Missing numeric bridge request identity');
     setTimeout(()=>receive({data:{requestId:r.requestId,ok:true,data:structuredClone(data)}}),0);
   }};
-  window.testStatus=status=>receive({data:{event:'status',data:{...structuredClone(state),status}}});
+  window.testStatus=(status,lightweight=false)=>{const data={...structuredClone(state),status};if(lightweight&&data.editor)delete data.editor.work;receive({data:{event:'status',data}});};
   window.testSetup=data=>receive({data:{event:'setup',data}});
 };
 const checks=async()=>{
@@ -258,6 +268,53 @@ const checks=async()=>{
     assert($('[data-profile-card="test-imported"]')&&APP.device===deviceBefore&&P().id===profileBefore&&JSON.stringify(P().work)===workBefore,'Import selected itself or lost the current draft');
     $('[data-act="back-eq"]').click();await wait(40);
     results.push('Profile library shows device usage, guards assigned deletion, confirms exact unused revision, exports without saving, cancels cleanly, and imports without applying');
+
+    await openProfiles();const adaptBefore=window.testRequests.length;
+    const adaptButton=$('[data-profile-card="test-assigned"] [data-prof]');
+    assert(!adaptButton.disabled&&adaptButton.textContent==='Adapt a copy…','Different channel count has no adaptation action');adaptButton.click();await wait(50);
+    const adaptDialog=$('.dlg'),adaptName=$('#adaptName');
+    assert(S.modal.kind==='adapt'&&$('#modalHost [data-mb="go"]').disabled,'Unmapped source channels were silently discarded');
+    assert($('[data-adapt-ch="0"]').textContent.includes('All 2 channels')&&$('[data-adapt-ch="1"]').textContent.includes('Choose channels'),'All/unmapped channel meaning is unclear');
+    adaptName.value='Stereo room';adaptName.dispatchEvent(new Event('input'));
+    $('[data-adapt-ch="1"]').click();$('[data-chopt="1"]').click();
+    assert($('.dlg')===adaptDialog&&$('#adaptName')===adaptName&&adaptName.value==='Stereo room','Mapping rebuilt dialog or lost name');
+    assert(S.modal.layers[1].mask===2&&!$('#modalHost [data-mb="go"]').disabled,'Mapping did not enable creation');
+    key($('#pop button'),'Escape');assert(!S.pop&&S.modal,'Escape from picker dismissed adaptation');
+    $('[data-adapt-ch="1"]').click();$('[data-adapt-ch="1"]').click();assert(!S.pop,'Channel button cannot close its own picker');
+    window.failAdapt=true;$('[data-mb="go"]').click();await wait(40);
+    assert($('.dlg')===adaptDialog&&$('#adaptError').textContent.includes('changed')&&adaptName.value==='Stereo room','Failed adaptation lost review or hid error');
+    window.failAdapt=false;$('[data-mb="go"]').click();await wait(60);
+    assert(!S.modal&&$('[data-profile-card="adapted-copy"]')&&P().id===profileBefore&&JSON.stringify(P().work)===workBefore,'Copy changed the original draft or selected itself');
+    const adaptRequest=window.testRequests.find(r=>r.op==='profile_adapt');
+    assert(adaptRequest.sourceRevision===1&&adaptRequest.draftRevision===null&&adaptRequest.target.id==='test-output'&&adaptRequest.targets[1].mask===2,'Adaptation lost identity or reviewed routing');
+    assert(!window.testRequests.slice(adaptBefore).some(r=>['save','edit','select','eq'].includes(r.op)),'Adaptation changed live audio');
+    window.testState.profiles[0].usedBy.push({id:'test-second',name:'Second test device',available:true,pending:true});
+    const cardBefore=$('[data-profile-card="test-profile"]');window.testStatus(window.testState.status);await wait(20);
+    assert($('[data-profile-card="test-profile"]')===cardBefore&&cardBefore.querySelector('.profile-usage').textContent.includes('update pending'),'Pending device state rebuilt library or was hidden');
+    window.testState.profiles[0].usedBy[1].pending=false;window.testStatus(window.testState.status);await wait(20);
+    assert(!cardBefore.querySelector('.profile-usage').textContent.includes('update pending'),'Confirmed delivery remained pending');
+    $('[data-act="back-eq"]').click();await wait(30);
+    assert($('.profile-devices').textContent==='Used on 2 devices','Editor hides multi-device profile usage');
+    $('#profileBtn').click();$('[data-prof="test-assigned"]').click();await wait(40);
+    assert(S.modal?.kind==='adapt','Profile dropdown did not offer adaptation');$('[data-mb="cancel"]').click();
+    results.push('Adapt a copy reviews every layer, keeps controls stable, retains failed reviews, preserves source/draft/audio and reports shared-device delivery without redraw');
+
+    await openProfiles();window.holdDeviceSwitch=true;
+    const switchProfileId=P().id,switchRate=P().curveRate;
+    for(const id of ['test-second','test-output']){
+      const previousDevice=APP.device;$('#devBtn').click();$(`[data-device="${id}"]`).click();await wait(30);
+      assert(APP.device===previousDevice&&S.modal,'Output switch did not wait for completion');
+      window.testState.device=id;window.testState.closing={state:'open'};
+      window.testStatus(window.testState.status,true);await wait(50);
+      assert(S.view==='library'&&APP.device===id&&P().id===switchProfileId&&P().curveRate===switchRate,'Shared-profile switch left Profiles or changed the profile');
+      assert($('#devBtn .device-name').textContent===D().name&&!S.modal,'Completed output switch left the Profiles dropdown stale');
+      $('#devBtn').click();assert($(`[data-device="${id}"] .ck svg`),'Output menu checkmark still points to the previous device');$('#devBtn').click();
+      const unchangedCard=$('[data-profile-card="test-profile"]'),requests=window.testRequests.length;
+      window.testStatus(window.testState.status,true);await wait(20);
+      assert($('[data-profile-card="test-profile"]')===unchangedCard&&!window.testRequests.slice(requests).some(r=>r.op==='state'),'Unchanged status rebuilt Profiles');
+    }
+    window.holdDeviceSwitch=false;
+    results.push('Asynchronous output switches refresh Profiles even with the same profile/rate; unchanged status keeps cards stable');
 
     window.testState.recoveries=[{id:'recover-1',name:'Earlier EQ',device:'Offline test output'},{id:'recover-2',name:'Another EQ',device:'Second test device'}];
     APP.recoveries=structuredClone(window.testState.recoveries);await openProfiles();

@@ -126,7 +126,7 @@ async function command(op,args={},quiet=false){
   if(editorGate()&&['new','select','rename','save_as','duplicate','save','apply','revert','undo','redo'].includes(op))return null;
   try{
     await flush();const data=await rpc(op,args);adopt(data);fixSel();render();handleClose();
-    if(!quiet&&op==='save')toast(APP.status.copy==='current'?'Profile saved':'Profile saved · device update pending');
+    if(!quiet&&op==='save')toast(APP.status.copy==='current'&&!APP.profiles.find(p=>p.id===P()?.id)?.usedBy?.some(d=>d.pending)?'Profile saved':'Profile saved · device update pending');
     return data;
   }catch(error){if(error.state)adopt(error.state);render();toast(error.message);if(trayWorking)rpc('window',{action:'show'}).catch(()=>{});return null;}
 }
@@ -157,7 +157,9 @@ function refresh(changed=true){
 }
 function profileBox(){
   const p=P();if(!p)return '';
+  const uses=APP.profiles.find(q=>q.id===p.id)?.usedBy?.length||0;
   return `<button class="pbtn" id="profileBtn" title="Switch profile"><span class="pn">${esc(p.name)}</span><span class="pl">${p.channels===2?'Stereo':p.channels+' channels'}</span>${p.dirty?'<span class="dot" title="Unsaved changes"></span>':''}${I('chev')}</button>
+    ${uses>1?`<div class="profile-devices" title="Edits preview on this device. Saving updates every device using this profile.">Used on ${uses} devices</div>`:''}
     ${p.dirty?'<div class="dirty"><span>Unsaved changes</span><button class="lnk" data-act="revert">Revert</button><button class="sbtn" data-act="save">Save</button></div>':''}`;
 }
 function undoBox(){return P()&&!editorGate()?`<button class="ib" data-act="undo" title="Undo (Ctrl+Z)" aria-label="Undo" ${P().undo?'':'disabled'}>${I('undo')}</button><button class="ib" data-act="redo" title="Redo (Ctrl+Y)" aria-label="Redo" ${P().redo?'':'disabled'}>${I('redo')}</button>`:'';}
@@ -223,14 +225,18 @@ async function loadProfilePreviews(){
     }
   }finally{profilePreviewsLoading=false;}
 }
+function profileUsage(p){
+  const used=p.usedBy||[];
+  return used.length?'Used on '+used.map(d=>d.name+(d.available?'':' (disconnected)')+(d.pending?' · update pending':'')).join(', '):'Not in use';
+}
 function profileLibraryView(){
   const recovery=(APP.recoveries||[]).length?`<section class="recovery-list"><h3>Unsaved edits from your previous session</h3><p>Keep them as a new profile to review. Your saved profiles and device EQ are unchanged.</p>${APP.recoveries.map(r=>`<div class="recovery-row"><span><strong>${esc(r.name)}</strong><small>${esc(r.device)}</small></span><button class="settings-button" data-recovery="keep" data-recovery-id="${esc(r.id)}">Keep as new profile</button><button class="settings-button" data-recovery="discard" data-recovery-id="${esc(r.id)}">Discard</button></div>`).join('')}</section>`:'';
   const cards=APP.profiles.map(p=>{
-    const used=p.usedBy||[],current=p.id===P()?.id,match=p.channels===D().channels;
+    const current=p.id===P()?.id,match=p.channels===D().channels;
     const count=(n,label)=>`${n??0} ${label}${n===1?'':'s'}`;
-    const usage=used.length?'Used on '+used.map(d=>d.name+(d.available?'':' (disconnected)')).join(', '):'Not in use';
+    const usage=profileUsage(p);
     const button=(action,label,icon,disabled=false)=>`<button class="ib" data-profile-action="${action}" data-profile-id="${esc(p.id)}" title="${esc(label)}" aria-label="${esc(label)}" ${disabled?'disabled':''}>${I(icon)}</button>`;
-    return `<article class="card${current?' sel':''}" data-profile-card="${esc(p.id)}"><div class="top"><span class="nm">${esc(p.name)}</span>${current&&P().dirty?'<span class="dot" title="Unsaved changes"></span>':''}<span class="lay">${p.channels===2?'Stereo':p.channels+' channels'}</span></div><div class="meta"><span>${count(p.layers,'layer')}</span><span>${count(p.filters,'filter')}</span></div><div class="profile-preview">${profilePreviewContent(p)}</div><p class="profile-usage">${esc(usage)}</p>${!match?`<p class="warn">This profile has ${p.channels} channels. ${esc(D().name)} has ${D().channels}.</p>`:''}<div class="acts"><button class="use" data-prof="${esc(p.id)}" ${current||!match||editorGate()?'disabled':''}>${current?'In use here':match?'Use on this device':'Different layout'}</button>${button('duplicate','Duplicate '+p.name,'copy')}${button('rename','Rename '+p.name,'pen')}${button('export',current&&P().dirty?'Export current edits':'Export '+p.name,'export',profileExportBusy)}${button('delete',p.canDelete?'Delete '+p.name:'Select another profile on its devices before deleting','trash',!p.canDelete)}</div></article>`;
+    return `<article class="card${current?' sel':''}" data-profile-card="${esc(p.id)}"><div class="top"><span class="nm">${esc(p.name)}</span>${current&&P().dirty?'<span class="dot" title="Unsaved changes"></span>':''}<span class="lay">${p.channels===2?'Stereo':p.channels+' channels'}</span></div><div class="meta"><span>${count(p.layers,'layer')}</span><span>${count(p.filters,'filter')}</span></div><div class="profile-preview">${profilePreviewContent(p)}</div><p class="profile-usage">${esc(usage)}</p>${!match?`<p class="warn">This profile has ${p.channels} channels. ${esc(D().name)} has ${D().channels}.</p>`:''}<div class="acts"><button class="use" data-prof="${esc(p.id)}" ${(current&&match)||editorGate()?'disabled':''}>${!match?'Adapt a copy…':current?'In use here':'Use on this device'}</button>${button('duplicate','Duplicate '+p.name,'copy')}${button('rename','Rename '+p.name,'pen')}${button('export',current&&P().dirty?'Export current edits':'Export '+p.name,'export',profileExportBusy)}${button('delete',p.canDelete?'Delete '+p.name:'Select another profile on its devices before deleting','trash',!p.canDelete)}</div></article>`;
   }).join('');
   return `<div class="body"><main class="lib"><div class="lib-h"><button class="back" data-act="back-eq">${I('back')}Editor</button><h2>Profiles</h2><span class="n">${APP.profiles.length}</span><span class="grow"></span><button class="act" data-act="import-profile">${I('import')}Import profile…</button><button class="act" data-act="new-profile" ${editorGate()?'disabled':''}>${I('plus')}New profile</button><input id="profileFile" type="file" accept=".contour" hidden></div>${recovery}${cards?`<div class="cards profiles-list">${cards}</div>`:'<div class="profile-empty"><h3>No profiles yet</h3><p>Create a profile or import a .contour file.</p></div>'}</main></div>`;
 }
@@ -240,6 +246,41 @@ async function openProfiles(){
   try{await flush();adopt(await rpc('state'));S.pop=null;S.view='library';render();}catch(error){toast(error.message);}
 }
 let profileExportBusy=false;
+async function openAdapt(id){
+  if(editorGate()||setupOperation)return;
+  document.activeElement?.blur();endGesture();
+  try{
+    await flush();const preview=await rpc('profile_adapt_preview',{id});
+    S.pop=null;
+    const layers=clone(preview.work.layers);
+    const sourceTargets=layers.map(l=>l.all?'All '+preview.sourceChannels+' channels':'Channel'+(bits(l.mask).length===1?' ':'s ')+bits(l.mask).map(i=>i+1).join(', '));
+    for(const l of layers)if(!l.all&&bits(l.mask).some(i=>i>=preview.target.channels))l.mask=0;
+    S.modal={kind:'adapt',...preview,name:preview.name+' copy',layers,sourceTargets,error:'',busy:false};renderOver();
+  }catch(error){toast(error.message);}
+}
+function adaptHtml(m){
+  return `<div class="scrim"><div class="dlg adapt-dialog" role="dialog" aria-modal="true" aria-labelledby="dialogTitle"><div class="dh"><h3 id="dialogTitle">Adapt a copy</h3><p>Review the channels for each layer on ${esc(D().name)}. The original profile will be kept.</p></div><div class="adapt-body"><label class="adapt-name">Profile name<input class="txt" id="adaptName" maxlength="120" value="${esc(m.name)}"></label><div class="adapt-head"><span>Layer · original channels</span><span>Destination · ${m.target.channels} channels</span></div><div class="adapt-layers">${m.layers.map((l,i)=>`<div class="adapt-row"><span><strong>${esc(l.name)}</strong><small>${esc(m.sourceTargets[i])}</small></span><button class="chip" data-adapt-ch="${i}" aria-label="Destination channels for ${esc(l.name)}"></button></div>`).join('')}</div><p class="adapt-note">Channel numbers may have different roles on another device. Check each selection before creating the copy.</p><p id="adaptError" class="adapt-error" role="alert"></p></div><div class="df"><button data-mb="cancel">Cancel</button><button class="go" data-mb="go">Create copy</button></div></div></div>`;
+}
+function adaptDevice(m){
+  const d=m.target,pos=Object.keys(POS).filter((_,i)=>(d.mask>>>i)&1);
+  return {...d,count:d.channels,pos:pos.length===d.channels?pos:null};
+}
+function updateAdapt(m,opening){
+  if(opening){const input=$('#adaptName');input.addEventListener('input',()=>{m.name=input.value;updateAdapt(m,false);});requestAnimationFrame(()=>{if(S.modal===m){input.focus();input.select();}});}
+  $$('[data-adapt-ch]').forEach(button=>{const l=m.layers[+button.dataset.adaptCh];button.innerHTML=(l.all?'All '+m.target.channels+' channels':l.mask?targetSummary(adaptDevice(m),l,true):'Choose channels')+I('chev');button.disabled=m.busy;});
+  $('#adaptError').textContent=m.error;
+  $('#adaptName').disabled=m.busy;
+  $('#modalHost [data-mb="cancel"]').disabled=m.busy;
+  const go=$('#modalHost [data-mb="go"]');go.disabled=m.busy||!m.name.trim()||m.layers.some(l=>!l.all&&!l.mask);go.textContent=m.busy?'Creating…':'Create copy';
+}
+async function commitAdapt(){
+  const m=S.modal;if(m?.kind!=='adapt'||m.busy||!m.name.trim()||m.layers.some(l=>!l.all&&!l.mask))return;
+  m.busy=true;m.error='';S.pop=null;renderOver();
+  try{
+    const data=await rpc('profile_adapt',{id:m.id,sourceRevision:m.sourceRevision,draftRevision:m.draftRevision,target:m.target,name:m.name.trim(),targets:m.layers.map(l=>({all:l.all,mask:l.mask>>>0}))});
+    adopt(data);S.modal=null;S.view='library';render();toast('Created '+m.name.trim());
+  }catch(error){m.busy=false;m.error=error.message;renderOver();}
+}
 async function exportDocument(op,args){
   if(profileExportBusy||setupOperation)return;
   profileExportBusy=true;S.pop=null;renderOver();document.activeElement?.blur();endGesture();
@@ -305,16 +346,17 @@ function popHtml(){
   const mi=(act,label,icon='',disabled=false)=>`<button class="mi" data-act="${act}" ${disabled?'disabled':''}><span class="ck">${icon?I(icon):''}</span>${label}</button>`;
   if(S.pop==='filtertype')return `<div role="listbox" aria-label="Filter type">${TYPES.map(([id,name])=>`<button class="mi type-option" role="option" aria-selected="${L()?.filters[S.typeBand]?.type===id}" tabindex="${L()?.filters[S.typeBand]?.type===id?0:-1}" data-filter-type="${id}"><span class="ck">${L()?.filters[S.typeBand]?.type===id?I('check'):''}</span>${name}</button>`).join('')}</div>`;
   if(S.pop==='devices')return '<div class="grp">Windows outputs</div>'+APP.devices.filter(d=>d.available||d.id===APP.device).map(d=>`<button class="mi" data-device="${esc(d.id)}"><span class="ck">${d.id===APP.device?I('check'):''}</span><span class="two">${esc(d.name)}<small>${d.channels} channels · ${d.rate/1000} kHz</small></span></button>`).join('')+'<div class="divide"></div>'+mi('setup','Manage devices…','settings');
-  if(S.pop==='profiles')return '<div class="grp">Profiles</div>'+APP.profiles.map(p=>`<button class="mi" data-prof="${esc(p.id)}" ${p.channels!==D().channels?'disabled':''}><span class="ck">${p.id===P()?.id?I('check'):''}</span>${esc(p.name)}<span class="meta">${p.channels} ch</span></button>`).join('')+'<div class="divide"></div>'+mi('save','Save','save',!P()?.dirty)+mi('save-as','Save as new profile…')+mi('duplicate-profile','Duplicate profile','copy')+mi('rename-profile','Rename…','pen')+mi('export-profile','Export profile…','export')+mi('new-profile','New profile…','plus')+'<div class="divide"></div>'+mi('profiles','Manage profiles…','grid');
+  if(S.pop==='profiles')return '<div class="grp">Profiles</div>'+APP.profiles.map(p=>`<button class="mi" data-prof="${esc(p.id)}" ><span class="ck">${p.id===P()?.id?I('check'):''}</span><span class="two">${esc(p.name)}${p.channels!==D().channels?'<small>Adapt a copy…</small>':''}</span><span class="meta">${p.channels} ch</span></button>`).join('')+'<div class="divide"></div>'+mi('save','Save','save',!P()?.dirty)+mi('save-as','Save as new profile…')+mi('duplicate-profile','Duplicate profile','copy')+mi('rename-profile','Rename…','pen')+mi('export-profile','Export profile…','export')+mi('new-profile','New profile…','plus')+'<div class="divide"></div>'+mi('profiles','Manage profiles…','grid');
   if(S.pop==='channels')return channelPicker(D(),L());
   if(S.pop==='impch')return channelPicker(D(),S.modal);
+  if(S.pop==='adaptch')return channelPicker(adaptDevice(S.modal),S.modal.layers[S.modal.activeLayer]);
   if(S.pop==='layermenu')return mi('rename-layer','Rename layer','pen')+mi('dup-layer','Duplicate layer','copy',LAYERS().length>=MAXL)+mi('import-into','Replace with imported filters…','import')+mi('export-layer','Export filters…','export',profileExportBusy)+'<div class="divide"></div>'+mi('layer-up','Move up','up',S.sel===0)+mi('layer-down','Move down','down',S.sel===LAYERS().length-1)+'<div class="divide"></div>'+mi('del-layer','Delete layer','trash');
   if(S.pop==='outch')return `<div class="grp">Combined filter channels</div><button class="mi" data-outmode="layer">This layer's channels</button><button class="mi" data-outmode="pick">Choose channels</button><div class="grid12">${Array.from({length:D().channels},(_,i)=>`<button class="spk${((S.outMask>>>i)&1)?' on':''}" data-outspk="${i}">${shortName(D(),i)}</button>`).join('')}</div>`;
   return '';
 }
 function dialog(title,body,buttons,input,on){S.pop=null;S.modal={title,body,buttons,input,on};renderOver();}
 let shownModal=null,shownModalHtml='',shownPopover='';
-function popAnchor(){return S.pop==='filtertype'?`#type-${S.typeBand}`:'#'+({devices:'devBtn',profiles:'profileBtn',channels:'chBtn',layermenu:'layerMenuBtn',outch:'outBtn',impch:'impChBtn'}[S.pop]);}
+function popAnchor(){return S.pop==='adaptch'?`[data-adapt-ch="${S.modal.activeLayer}"]`:S.pop==='filtertype'?`#type-${S.typeBand}`:'#'+({devices:'devBtn',profiles:'profileBtn',channels:'chBtn',layermenu:'layerMenuBtn',outch:'outBtn',impch:'impChBtn'}[S.pop]);}
 function positionPopover(){
   const pop=$('#pop'),anchor=$(popAnchor());if(!pop||!anchor)return;
   const rect=anchor.getBoundingClientRect(),r=pop.getBoundingClientRect();
@@ -333,7 +375,7 @@ function renderOver(){
     if(opening){host=document.createElement('div');host.id='modalHost';over.prepend(host);}
     // An open import owns live textarea/file/canvas nodes. Channel choices and
     // nested menus must never replace them or replay the dialog's animation.
-    const html=m.kind==='import'&&!opening?shownModalHtml:m.kind==='import'?importHtml(m):`<div class="scrim"><div class="dlg" role="dialog" aria-modal="true" aria-labelledby="dialogTitle"><div class="dh"><h3 id="dialogTitle">${esc(m.title)}</h3><p class="status-detail">${esc(m.body||'')}</p>${m.input!==undefined?`<input class="txt" id="dlgIn" aria-label="Name" maxlength="120" value="${esc(m.input)}">`:''}</div><div class="df">${m.buttons.map(([id,label,style])=>`<button data-mb="${id}" class="${style||''}">${esc(label)}</button>`).join('')}</div></div></div>`;
+    const html=['import','adapt'].includes(m.kind)&&!opening?shownModalHtml:m.kind==='import'?importHtml(m):m.kind==='adapt'?adaptHtml(m):`<div class="scrim"><div class="dlg" role="dialog" aria-modal="true" aria-labelledby="dialogTitle"><div class="dh"><h3 id="dialogTitle">${esc(m.title)}</h3><p class="status-detail">${esc(m.body||'')}</p>${m.input!==undefined?`<input class="txt" id="dlgIn" aria-label="Name" maxlength="120" value="${esc(m.input)}">`:''}</div><div class="df">${m.buttons.map(([id,label,style])=>`<button data-mb="${id}" class="${style||''}">${esc(label)}</button>`).join('')}</div></div></div>`;
     if(html!==shownModalHtml){
       if(opening)host.innerHTML=html;
       else{const template=document.createElement('template');template.innerHTML=html;const next=template.content.querySelector('.dlg');const current=host.querySelector('.dlg');current.innerHTML=next.innerHTML;current.setAttribute('aria-labelledby',next.getAttribute('aria-labelledby'));}
@@ -343,6 +385,8 @@ function renderOver(){
       if(opening)bindImport();
       const button=$('#impChBtn'),label=targetSummary(D(),m,true)+I('chev');
       if(button.innerHTML!==label)button.innerHTML=label;
+    }else if(m.kind==='adapt'){
+      updateAdapt(m,opening);
     }else if(opening)requestAnimationFrame(()=>{if(S.modal!==m)return;const el=$('#dlgIn')||$('#over [data-mb]');el?.focus();if(el?.select)el.select();});
   }
   const key=S.pop==='filtertype'?S.pop+S.typeBand:S.pop;
@@ -358,10 +402,12 @@ function renderOver(){
   }
   $$('[data-type]').forEach(el=>el.setAttribute('aria-expanded',String(S.pop==='filtertype'&&+el.dataset.type===S.typeBand)));
 }
-function modalAct(id){const m=S.modal;if(!m)return;const value=$('#dlgIn')?.value.trim()||'';if(m.kind==='import'){if(id==='go')commitImport();else{S.modal=null;S.pop=null;renderOver();}return;}S.modal=null;renderOver();m.on?.[id]?.(value);}
+function modalAct(id){const m=S.modal;if(!m)return;if(m.kind==='adapt'){if(m.busy)return;if(id==='go')commitAdapt();else{S.modal=null;S.pop=null;renderOver();}return;}const value=$('#dlgIn')?.value.trim()||'';if(m.kind==='import'){if(id==='go')commitImport();else{S.modal=null;S.pop=null;renderOver();}return;}S.modal=null;renderOver();m.on?.[id]?.(value);}
 let toastTimer;
 function toast(message){let el=$('#toast');if(!el){el=document.createElement('div');el.id='toast';el.className='toast';el.role='status';document.body.append(el);}el.textContent=message;el.classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.remove(),5000);}
 async function switchProfile(id,choice){
+  const profile=APP.profiles.find(p=>p.id===id);
+  if(profile&&profile.channels!==D().channels){await openAdapt(id);return;}
   S.pop=null;await flush();const data=await command('select',{id,...(choice?{choice}:{})},true);
   if(data?.decision==='select')dialog('Save changes?',`Save your changes to ${P().name} before switching profiles?`,[['cancel','Cancel'],['discard',"Don't save"],['save','Save','go']],undefined,{save:()=>switchProfile(id,'save'),discard:()=>switchProfile(id,'discard')});
   else if(data&&P()?.id===id){S.view='editor';S.sel=0;S.band=0;render();}
@@ -372,7 +418,7 @@ function handleClose(){
   if(c.state==='open'){if(lastClose!=='open'){S.modal=null;renderOver();}lastClose='open';return;}
   if(c.state===lastClose)return;lastClose=c.state;const cancel=()=>command('close',{action:'cancel'},true);
   if(c.state==='needs_decision')dialog('Save changes?',`Save your changes to ${P()?.name||'this profile'} before ${c.switching?'switching outputs':'closing'}?`,[['cancel','Cancel'],['discard',"Don't save"],['save','Save','go']],undefined,{cancel,save:()=>command('close',{choice:'save'},true),discard:()=>command('close',{choice:'discard'},true)});
-  else if(c.state==='waiting')dialog('Updating the device…','Waiting for the audio engine to confirm the final EQ.',[['cancel','Keep editing']],undefined,{cancel});
+  else if(c.state==='waiting')dialog('Updating EQ…',c.detail||'Waiting for the audio engine to confirm the final EQ.',[['cancel','Keep editing']],undefined,{cancel});
   else if(c.state==='needs_attention')dialog('Device update pending',c.detail,[['cancel','Keep editing'],['pending',c.switching?'Switch with update pending':'Quit with update pending'],['retry','Retry','go']],undefined,{cancel,pending:()=>command('close',{action:'leave_pending'},true),retry:()=>command('close',{action:'retry'},true)});
 }
 function nameDialog(op,title,initial){dialog(title,op==='save_as'?'The new profile gets your current edits. The original returns to its last save.':'',[['cancel','Cancel'],['go','Save','go']],initial,{go:name=>{if(name)command(op,{name});}});}
@@ -473,6 +519,7 @@ document.addEventListener('click',async e=>{
   const typeChoice=t.closest('[data-filter-type]');if(typeChoice){chooseFilterType(typeChoice.dataset.filterType);return;}
   const anchors={devBtn:'devices',profileBtn:'profiles',chBtn:'channels',layerMenuBtn:'layermenu',outBtn:'outch',impChBtn:'impch'};
   const a=t.closest('#devBtn,#profileBtn,#chBtn,#layerMenuBtn,#outBtn,#impChBtn');if(a){S.pop=S.pop===anchors[a.id]?null:anchors[a.id];renderOver();return;}
+  const adapt=t.closest('[data-adapt-ch]');if(adapt){if(S.modal?.busy)return;const index=+adapt.dataset.adaptCh,same=S.pop==='adaptch'&&S.modal.activeLayer===index;S.modal.activeLayer=index;S.pop=same?null:'adaptch';renderOver();return;}
   if(S.pop&&!t.closest('#pop'))closePopover();
   const device=t.closest('[data-device]');if(device){S.pop=null;await command('device',{id:device.dataset.device},true);return;}
   const profileActionButton=t.closest('[data-profile-action]');if(profileActionButton){if(!profileActionButton.disabled)profileAction(profileActionButton.dataset.profileAction,profileActionButton.dataset.profileId);return;}
@@ -483,9 +530,9 @@ document.addEventListener('click',async e=>{
     return;
   }
   const pf=t.closest('[data-prof]');if(pf){switchProfile(pf.dataset.prof);return;}
-  const target=S.pop==='impch'?S.modal:L(),ch=fn=>{if(S.pop==='impch'){fn(target);renderOver();}else edit(()=>fn(target));};
+  const target=S.pop==='adaptch'?S.modal.layers[S.modal.activeLayer]:S.pop==='impch'?S.modal:L(),ch=fn=>{if(['impch','adaptch'].includes(S.pop)){fn(target);if(S.modal.kind==='adapt')S.modal.error='';renderOver();}else edit(()=>fn(target));};
   const co=t.closest('[data-chopt]');if(co){ch(l=>{l.all=co.dataset.chopt==='all';l.mask=l.all?0:(1<<+co.dataset.chopt)>>>0;});return;}
-  const cm=t.closest('[data-chmode]');if(cm){ch(l=>{l.all=cm.dataset.chmode==='all';l.mask=l.all?0:fullMask(D())>>>0;});return;}
+  const cm=t.closest('[data-chmode]');if(cm){ch(l=>{l.all=cm.dataset.chmode==='all';l.mask=l.all?0:fullMask(S.pop==='adaptch'?adaptDevice(S.modal):D())>>>0;});return;}
   const sp=t.closest('[data-spk]');if(sp){const mask=(target.all?(1<<+sp.dataset.spk):target.mask^(1<<+sp.dataset.spk))>>>0;if(!mask){toast('Choose at least one channel');return;}ch(l=>{l.all=false;l.mask=mask;});return;}
   const grp=t.closest('[data-grp]');if(grp){ch(l=>{l.all=false;l.mask=+grp.dataset.grp>>>0;});return;}
   const om=t.closest('[data-outmode]');if(om){S.outMode=om.dataset.outmode;S.output=true;if(!S.outMask)S.outMask=fullMask(D())>>>0;render();return;}
@@ -556,12 +603,15 @@ if(window.chrome?.webview){
     if(message.event==='close'){document.activeElement?.blur();endGesture();command('close',{},true);return;}
     if(message.event==='error'){toast(message.error);return;}
     if(message.event==='status'&&APP){
-      const before=P()?.id,rate=P()?.curveRate,canAdopt=!pendingEdit&&!gesture&&replies.size===0;
+      const before=P()?.id,device=APP.device,rate=P()?.curveRate,canAdopt=!pendingEdit&&!gesture&&replies.size===0;
       const rateChanged=canAdopt&&message.data.editor?.curveRate!==rate;
       adopt(message.data,canAdopt);statusbar();handleClose();
+      if(S.view==='library')$$('[data-profile-card]').forEach(card=>{const p=APP.profiles.find(p=>p.id===card.dataset.profileCard);if(p)card.querySelector('.profile-usage').textContent=profileUsage(p);});
       updateEditorAvailability();updateSettingsStatus();
       publishTray();
-      if(before!==P()?.id||rateChanged)command('state',{},true);
+      // A completed output switch can retain both the profile and sample rate.
+      // Refresh device-dependent labels and actions even in that case.
+      if(device!==APP.device||before!==P()?.id||rateChanged)command('state',{},true);
     }
   });
   rpc('state').then(data=>{adopt(data);if(APP.recoveries?.length)S.view='library';render();syncWindowTheme();}).catch(error=>{$('#win').innerHTML=`<div class="fatal">${esc(error.message)}</div>`;});

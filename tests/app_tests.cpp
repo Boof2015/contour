@@ -316,6 +316,120 @@ void idle_edits(const std::filesystem::path& path){
     f.publish_status();f.model->poll();f.consume();f.output_is(-9);
     require(f.model->closed(),"Idle close did not finish after the resumed audio acknowledgement");
 }
+void profile_devices(const std::filesystem::path& path){
+    Fixture first(path),second(path.wstring()+L".second"),other(path.wstring()+L".other");
+    first.model.reset();second.model.reset();other.model.reset();
+    const auto enumerator=Microsoft::WRL::Make<MultiEnumerator>();
+    enumerator->devices={{endpoint_id,first.endpoint},{L"second-output",second.endpoint},{L"other-output",other.endpoint}};
+    std::string shared,independent;
+    { ProfileLibrary library(path);shared=library.entries().front().id;independent=library.duplicate_saved(shared,"Independent").id;
+      ProfileWorkspace assignment(library,L"second-output");assignment.select(shared);
+      ProfileWorkspace other_assignment(library,L"other-output");other_assignment.select(independent); }
+    const std::vector<Device> devices={{endpoint_id,"First",2,48000,3,true},{L"second-output","Second",2,48000,3,true},{L"other-output","Other",2,48000,3,true}};
+    auto model=std::make_unique<Model>(path,devices,enumerator.Get());
+    const auto acknowledge=[&]{for(int i=0;i<3;++i){first.process_request();second.process_request();model->poll();}};
+    const auto gain=[&](double value){auto work=model->state()["editor"]["work"];work["layers"][0]["gain"]=value;model->dispatch({{"op","edit"},{"work",work}});};
+    const auto pending=[&]{const auto profiles=model->state()["profiles"];for(const auto& p:profiles)for(const auto& d:p["usedBy"])if(d["id"]=="second-output")return d["pending"].get<bool>();return false;};
+    const auto other_writes=other.saved->writes,second_live=second.live->writes,second_saved=second.saved->writes;
+    gain(-4);first.process_request();model->poll();
+    require(second.live->writes==second_live&&second.saved->writes==second_saved,"Draft leaked to another device");
+    model->dispatch({{"op","save"}});
+    require(read_saved_profile(*second.saved.Get())->configuration.layers[0].gain_db==-4&&pending(),"Save did not update the other assigned device or track confirmation");
+    acknowledge();require(!pending(),"Other device acknowledgement stayed pending");first.output_is(-4);second.output_is(-4);
+    gain(-8);model->dispatch({{"op","save"}});gain(-9);model->dispatch({{"op","save"}});
+    model->dispatch({{"op","rename"},{"name","Same profile"}});acknowledge();
+    require(!pending()&&read_saved_profile(*second.saved.Get())->configuration.layers[0].gain_db==-9,"Rapid Save/rename retained a stale delivery");second.output_is(-9);
+    const auto before_rename=second.saved->writes;model->dispatch({{"op","rename"},{"name","Renamed"}});model->poll();
+    require(second.saved->writes==before_rename,"Rename needlessly rewrote audio");
+    second.saved->write_result=E_ACCESSDENIED;gain(-10);auto state=model->dispatch({{"op","save"}});
+    require(!state["editor"]["dirty"].get<bool>()&&pending()&&!state["masterIssues"].empty(),"Partial Save lost library checkpoint or hid another device's failure");
+    require(read_saved_profile(*first.saved.Get())->configuration.layers[0].gain_db==-10,"Other device failure prevented current Save");
+    second.saved->write_result=S_OK;model->dispatch({{"op","save"}});acknowledge();
+    require(!pending()&&model->state()["masterIssues"].empty(),"Clean Save did not retry partial delivery");
+    second.endpoint->device_state=DEVICE_STATE_UNPLUGGED;gain(-11);model->dispatch({{"op","save"}});
+    require(read_saved_profile(*second.saved.Get())->configuration.layers[0].gain_db==-11&&!pending(),"Disconnected next-start copy waited for a runtime acknowledgement");
+    second.endpoint->device_state=DEVICE_STATE_ACTIVE;
+    gain(-12);state=model->dispatch({{"op","select"},{"id",independent},{"choice","save"}});acknowledge();
+    require(state["editor"]["id"]==independent&&read_saved_profile(*second.saved.Get())->configuration.layers[0].gain_db==-12,"Save on profile switch did not propagate previous profile");
+    require(other.saved->writes==other_writes,"Shared Save altered a different profile's device");
+    model->dispatch({{"op","select"},{"id",shared}});acknowledge();
+    gain(-13);state=model->dispatch({{"op","close"},{"choice","save"}});
+    first.process_request();model->poll();require(!model->closed()&&pending(),"Quit abandoned another assigned device");
+    acknowledge();require(model->closed(),"Quit did not finish after shared Save was confirmed");
+    require(read_saved_profile(*second.saved.Get())->configuration.layers[0].gain_db==-13,"Save on Quit did not reach other device");
+    model=std::make_unique<Model>(path,devices,enumerator.Get());gain(-14);model->dispatch({{"op","save"}});
+    gain(-15);state=model->dispatch({{"op","close"},{"choice","discard"}});
+    model->dispatch({{"op","close"},{"action","cancel"}});
+    require(model->state()["editor"]["dirty"].get<bool>()&&model->state()["editor"]["work"]["layers"][0]["gain"]==-15,"Cancel shared close lost draft");
+    acknowledge();
+    // A failed device copy must be recoverable from the durable library after
+    // an explicit pending exit; no volatile queue can be the only record.
+    second.saved->write_result=E_ACCESSDENIED;model->dispatch({{"op","save"}});
+    model->dispatch({{"op","close"}});model->dispatch({{"op","close"},{"action","leave_pending"}});
+    first.process_request();model->poll();
+    require(model->closed(),"Explicit pending exit did not complete");
+    second.saved->write_result=S_OK;model=std::make_unique<Model>(path,devices,enumerator.Get());
+    model->poll();Sleep(2050);model->poll();acknowledge();
+    require(read_saved_profile(*second.saved.Get())->configuration.layers[0].gain_db==-15,"Restart did not reconcile a failed assigned-device copy");
+    second.output_is(-15);
+    second.saved->write_result=E_ACCESSDENIED;gain(-16);model->dispatch({{"op","save"}});
+    gain(-17);model->dispatch({{"op","close"},{"choice","save"}});model->dispatch({{"op","close"},{"action","leave_pending"}});
+    first.process_request();model->poll();require(model->closed(),"Save during pending exit queued another shared wait");
+    second.saved->write_result=S_OK;
+    // Only the second output now uses the profile; its deferred copy must
+    // still be repaired after restart.
+    {ProfileLibrary library(path);ProfileWorkspace assignment(library,endpoint_id);assignment.select(independent);}
+    model=std::make_unique<Model>(path,devices,enumerator.Get());model->poll();Sleep(2050);model->poll();acknowledge();
+    require(read_saved_profile(*second.saved.Get())->configuration.layers[0].gain_db==-17,"Single remaining assignment lost a pending Save");
+    model->dispatch({{"op","select"},{"id",shared}});acknowledge();
+    const auto uninstalled_writes=second.saved->writes;second.endpoint->activation_result=E_NOTFOUND;
+    gain(-18);model->dispatch({{"op","save"}});first.process_request();model->poll();
+    require(second.saved->writes==uninstalled_writes,"Remembered profile wrote an uninstalled device");
+    require(!pending(),"Remembered profile left an uninstalled device pending");
+}
+void profile_adaptation(const std::filesystem::path& path){
+    Fixture f(path);f.model.reset();std::string source;
+    Profile surround;surround.channels=6;
+    surround.configuration.layers={{"All",{true,0},{{FilterType::peak,1000,-4,2}},-3,true},
+        {"Rear",{false,48},{{FilterType::low_shelf,120,2,1}},-2,false}};
+    {ProfileLibrary library(path);source=library.create("Surround",surround).id;}
+    f.model=std::make_unique<Model>(path,std::vector<Device>{{endpoint_id,"Fixture",2,48000,3,true}},f.enumerator.Get());
+    const auto before=f.model->state()["editor"];const auto lw=f.live->writes,sw=f.saved->writes;
+    auto preview=f.model->dispatch({{"op","profile_adapt_preview"},{"id",source}});
+    require(preview["sourceChannels"]==6&&preview["target"]["channels"]==2&&preview["work"]["layers"][1]["mask"]==48,"Adaptation preview changed source routing");
+    Json request={{"op","profile_adapt"},{"id",source},{"name","Stereo copy"},{"sourceRevision",preview["sourceRevision"]},
+        {"draftRevision",preview["draftRevision"]},{"target",preview["target"]},{"targets",Json::array({{{"all",true},{"mask",0u}},{{"all",false},{"mask",0u}}})}};
+    const auto reject=[&](Json invalid){bool rejected=false;try{f.model->dispatch(invalid);}catch(const std::exception&){rejected=true;}require(rejected,"Invalid or stale adaptation was accepted");};
+    reject(request);request["targets"][1]["mask"]=2u;
+    auto invalid=request;invalid["targets"][1]["mask"]=4u;reject(invalid);
+    invalid=request;invalid["targets"][0]["mask"]=1u;reject(invalid);
+    invalid=request;invalid["targets"].erase(0);reject(invalid);
+    invalid=request;invalid["sourceRevision"]=0;reject(invalid);
+    invalid=request;invalid["target"]["mask"]=0;reject(invalid);
+    auto state=f.model->dispatch(request);const auto copied=state["createdProfileId"].get<std::string>();
+    {ProfileLibrary library(path);auto expected=surround;expected.channels=2;expected.configuration.layers[1].channels.mask=2;
+     require(library.get(source).saved==surround&&library.get(copied).saved==expected,"Adaptation changed source or filter settings");
+     require(std::none_of(library.assignments().begin(),library.assignments().end(),[&](const auto& a){return a.profile_id==copied;}),"Adapted copy assigned itself");}
+    require(state["editor"]==before&&lw==f.live->writes&&sw==f.saved->writes,"Adaptation auditioned or changed active EQ");
+    // Adapting the current profile copies its draft, but stale reviews cannot
+    // silently replace later edits or guess a new device layout.
+    auto work=f.work();work["layers"][0]["gain"]=-6;f.edit(work);
+    preview=f.model->dispatch({{"op","profile_adapt_preview"},{"id",before["id"]}});
+    request={{"op","profile_adapt"},{"id",before["id"]},{"name","Draft copy"},{"sourceRevision",preview["sourceRevision"]},
+        {"draftRevision",preview["draftRevision"]},{"target",preview["target"]},{"targets",Json::array({{{"all",true},{"mask",0u}}})}};
+    work["layers"][0]["gain"]=-7;f.edit(work);reject(request);
+    preview=f.model->dispatch({{"op","profile_adapt_preview"},{"id",before["id"]}});request["draftRevision"]=preview["draftRevision"];
+    state=f.model->dispatch(request);{ProfileLibrary library(path);require(library.get(state["createdProfileId"].get<std::string>()).saved.configuration.layers[0].gain_db==-7,"Current draft missing from adapted copy");}
+    f.model=std::make_unique<Model>(path,std::vector<Device>{{endpoint_id,"32-channel fixture",32,48000,0,true}},f.enumerator.Get());
+    preview=f.model->dispatch({{"op","profile_adapt_preview"},{"id",source}});
+    request={{"op","profile_adapt"},{"id",source},{"name","Channel 32"},{"sourceRevision",preview["sourceRevision"]},{"draftRevision",preview["draftRevision"]},
+        {"target",preview["target"]},{"targets",Json::array({{{"all",true},{"mask",0u}},{{"all",false},{"mask",0x80000000u}}})}};
+    state=f.model->dispatch(request);{ProfileLibrary library(path);require(library.get(state["createdProfileId"].get<std::string>()).saved.configuration.layers[1].channels.mask==0x80000000u,"Channel 32 mapping was truncated");}
+    // The target rate is validated with the same native compiler as playback.
+    f.model=std::make_unique<Model>(path,std::vector<Device>{{endpoint_id,"Low-rate fixture",2,1000,3,true}},f.enumerator.Get());
+    preview=f.model->dispatch({{"op","profile_adapt_preview"},{"id",source}});request["target"]=preview["target"];request["targets"][1]["mask"]=2u;reject(request);
+    f.model=std::make_unique<Model>(path,std::vector<Device>{{endpoint_id,"Disconnected",2,48000,3,false}},f.enumerator.Get());reject(request);
+}
 void master_devices(const std::filesystem::path& path){
     Fixture first(path),second(path.wstring()+L".second"),unassigned(path.wstring()+L".unassigned");
     first.model.reset();second.model.reset();unassigned.model.reset();
@@ -421,5 +535,7 @@ int wmain(int argc,wchar_t** argv){
     suite.run("global EQ bypass preserves profiles/history and survives selection, save, restart and audio idle",[&]{master_eq(dir/L"master.library");});
     suite.run("idle edits coalesce, Save persists without playback, and close delivers automatically on resume",[&]{idle_edits(dir/L"idle.library");});
     suite.run("global EQ reaches assigned and unassigned outputs, preserves drafts and reports retryable partial failure",[&]{master_devices(dir/L"master-devices.library");});
+    suite.run("profile Save updates assigned devices, keeps previews local, retries partial failures and survives close/restart",[&]{profile_devices(dir/L"profile-devices.library");});
+    suite.run("adapted copies review routing, preserve source and draft, reject stale or invalid targets and never touch audio",[&]{profile_adaptation(dir/L"adapt.library");});
     const auto result=suite.finish();CoUninitialize();return result;
 }
