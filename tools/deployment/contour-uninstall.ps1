@@ -1,7 +1,7 @@
 # Installer-owned entry point. No caller-supplied paths or registry addresses.
 # Inspect is read-only; Remove requires elevation and a closed editor.
 [CmdletBinding()]
-param([ValidateSet('Inspect','Remove')][string]$Action='Inspect',[switch]$PlainText)
+param([ValidateSet('Inspect','Remove')][string]$Action='Inspect',[switch]$PlainText,[switch]$DeleteUserData)
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
 $ProgressPreference='SilentlyContinue'
@@ -43,7 +43,10 @@ try {
         $mutex=[Threading.Mutex]::new($false,'Global\ContourLabDeployment')
         try { $owns=$mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $owns=$true }
         if (-not $owns) { throw 'Another Contour installation or removal is running.' }
-        if (@(Get-Process -Name contour -ErrorAction SilentlyContinue).Count) { throw 'Quit Contour from its tray menu, then retry uninstallation.' }
+        $installedExe=Join-Path (Split-Path $PSScriptRoot -Parent) 'contour.exe'
+        if (@(Get-Process -Name contour -ErrorAction SilentlyContinue | Where-Object { $_.Path -ieq $installedExe }).Count) {
+            throw 'Contour reopened during removal. Retry uninstallation to close it automatically.'
+        }
     }
     $root=[Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine,[Microsoft.Win32.RegistryView]::Registry64)
     $store=[Contour.Deployment.RegistryStore]::new($root,($Action -eq 'Remove'))
@@ -96,8 +99,12 @@ try {
                 try { Remove-ProductStartupEntry $startupStore $executable } finally { $startupStore.Dispose() }
             }
         } finally { $users.Dispose() }
-        if ($PlainText) { Write-Output 'Contour audio processing was removed. Your profiles were kept.' }
-        else { @{removed=$true;keptProfiles=$true;preservedAudioCompatibility=$true} | ConvertTo-Json -Compress }
+        if ($DeleteUserData) { Remove-ProductUserData @(Get-ProductUserProfiles) }
+        if ($PlainText) {
+            if ($DeleteUserData) { Write-Output 'Contour audio processing, saved profiles, and settings were removed.' }
+            else { Write-Output 'Contour audio processing was removed. Your profiles were kept.' }
+        }
+        else { @{removed=$true;keptProfiles=(-not $DeleteUserData);preservedAudioCompatibility=$true} | ConvertTo-Json -Compress }
     }
 } catch {
     if ($PlainText) { Write-Output $_.Exception.Message }

@@ -167,6 +167,32 @@ try {
         Invoke-ProductRemoval $f.Store $f.Package @callbacks;Removed $f
         ++$passed;Write-Output "PASS process termination and retry at $point"
     }
+    $profiles=@((Join-Path $work 'user-a'),(Join-Path $work 'user-b'))
+    foreach ($profile in $profiles) {
+        $data=Join-Path $profile 'AppData\Local\Contour';[void][IO.Directory]::CreateDirectory($data)
+        foreach ($name in @('profiles.contour-library','profiles.contour-library.settings','profiles.contour-library.drafts','profiles.contour-library.lock','profiles.contour-library.{00112233-4455-6677-8899-aabbccddeeff}.tmp','exported.contour','notes.txt')) {
+            [IO.File]::WriteAllText((Join-Path $data $name),'keep until explicit cleanup')
+        }
+    }
+    Remove-ProductUserData $profiles
+    foreach ($profile in $profiles) {
+        $data=Join-Path $profile 'AppData\Local\Contour'
+        Assert (@(Get-ChildItem -LiteralPath $data).Count -eq 2) 'Known saved profile data remains.'
+        Assert ((Test-Path -LiteralPath (Join-Path $data 'exported.contour')) -and (Test-Path -LiteralPath (Join-Path $data 'notes.txt'))) 'Cleanup removed an exported profile or unrelated file.'
+    }
+    Remove-ProductUserData $profiles
+    ++$passed;Write-Output 'PASS opt-in cleanup removes profiles, preferences, recovery and temporary files for multiple accounts; exports survive; retry is safe'
+    $profile=Join-Path $work 'redirected-user';[void][IO.Directory]::CreateDirectory((Join-Path $profile 'AppData\Local'))
+    $target=Join-Path $work 'foreign-data';[void][IO.Directory]::CreateDirectory($target)
+    [IO.File]::WriteAllText((Join-Path $target 'profiles.contour-library'),'foreign profile')
+    $link=Join-Path $profile 'AppData\Local\Contour'
+    [void](New-Item -ItemType Junction -Path $link -Target $target)
+    Fails { Remove-ProductUserData @($profile) }
+    Fails { [Contour.Deployment.UserDataFile]::Delete((Join-Path $link 'profiles.contour-library')) }
+    Assert ([IO.File]::ReadAllText((Join-Path $target 'profiles.contour-library')) -eq 'foreign profile') 'Cleanup followed a redirected data folder.'
+    # Remove only the known junction itself, never its contents.
+    [IO.Directory]::Delete($link,$false)
+    ++$passed;Write-Output 'PASS user data cleanup refuses redirected folders'
     Write-Output "PASS $passed product removal checks; no real devices or audio services changed"
 } finally {
     foreach ($store in $stores) { $store.Dispose() }

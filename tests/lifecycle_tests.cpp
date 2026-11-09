@@ -34,11 +34,11 @@ template<class Predicate> void wait_for(Predicate test,const char* message){
     const auto deadline=GetTickCount64()+10000;
     while(!test()){require(GetTickCount64()<deadline,message);Sleep(25);}
 }
-void send_session(HWND window,UINT message,WPARAM ended){
-    DWORD_PTR result=0;require(SendMessageTimeoutW(window,message,ended,ENDSESSION_LOGOFF,SMTO_ABORTIFHUNG,4000,&result)!=0,"Isolated session message timed out");
+void send_session(HWND window,UINT message,WPARAM ended,LPARAM flags=ENDSESSION_LOGOFF){
+    DWORD_PTR result=0;require(SendMessageTimeoutW(window,message,ended,flags,SMTO_ABORTIFHUNG,4000,&result)!=0,"Isolated session message timed out");
     if(message==WM_QUERYENDSESSION)require(result==TRUE,"Clean editor blocked sign-out");
 }
-void exercise(const std::filesystem::path& exe,const std::filesystem::path& data){
+void exercise(const std::filesystem::path& exe,const std::filesystem::path& data,LPARAM ending){
     std::filesystem::create_directories(data);
     std::ofstream(data/L"profiles.contour-library.settings")<<R"({"version":1,"eqEnabled":true,"startInTray":true,"closeToTray":true})";
     Process editor(exe,data,true);HWND window=nullptr;
@@ -52,7 +52,7 @@ void exercise(const std::filesystem::path& exe,const std::filesystem::path& data
     wait_for([&]{return IsWindowVisible(window)!=FALSE;},"Explicit launch did not reveal the existing editor");
     send_session(window,WM_QUERYENDSESSION,0);send_session(window,WM_ENDSESSION,FALSE);
     require(editor.running()&&IsWindowVisible(window),"Cancelled sign-out closed or hid the editor");
-    send_session(window,WM_QUERYENDSESSION,0);send_session(window,WM_ENDSESSION,TRUE);
+    send_session(window,WM_QUERYENDSESSION,0,ending);send_session(window,WM_ENDSESSION,TRUE,ending);
     wait_for([&]{return !editor.running();},"Confirmed sign-out was routed to close-to-tray or waited for audio");
 }
 }
@@ -60,7 +60,8 @@ int wmain(int argc,wchar_t** argv){
     try {
         require(argc==3,"Usage: lifecycle-tests contour.exe test-directory");
         const auto dir=std::filesystem::absolute(argv[2])/(std::to_wstring(GetCurrentProcessId())+L"-"+std::to_wstring(GetTickCount64()));
-        exercise(std::filesystem::absolute(argv[1]),dir);
-        std::cout<<"PASS start hidden; automatic relaunch stays hidden; explicit relaunch restores; cancelled and confirmed session-end messages\n";return 0;
+        exercise(std::filesystem::absolute(argv[1]),dir/L"session",ENDSESSION_LOGOFF);
+        exercise(std::filesystem::absolute(argv[1]),dir/L"installer",ENDSESSION_CLOSEAPP);
+        std::cout<<"PASS start hidden; automatic relaunch stays hidden; explicit relaunch restores; cancelled and confirmed session-end and installer-close messages\n";return 0;
     } catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
 }

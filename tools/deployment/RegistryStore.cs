@@ -8,6 +8,46 @@ using Microsoft.Win32;
 using Microsoft.Win32.SafeHandles;
 
 namespace Contour.Deployment {
+    public static class UserDataFile {
+        [StructLayout(LayoutKind.Sequential)]
+        struct Attributes { public uint Value, Tag; }
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern SafeFileHandle CreateFile(string path, uint access, uint sharing,
+            IntPtr security, uint creation, uint flags, IntPtr template);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern uint GetFinalPathNameByHandle(SafeFileHandle file, StringBuilder path, uint capacity, uint flags);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool GetFileInformationByHandleEx(SafeFileHandle file, int kind, out Attributes value, uint size);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool SetFileInformationByHandle(SafeFileHandle file, int kind, ref byte delete, uint size);
+
+        public static void Delete(string path) {
+            var expected = Path.GetFullPath(path);
+            // Open the exact file for deletion, without following a leaf link.
+            // Keep the handle through validation and deletion, avoiding a second
+            // path lookup if a user changes a directory during elevated cleanup.
+            using (var file = CreateFile(expected, 0x10080, 3, IntPtr.Zero, 3, 0x00200000, IntPtr.Zero)) {
+                if (file.IsInvalid) {
+                    var error = Marshal.GetLastWin32Error();
+                    if (error == 2 || error == 3) return;
+                    throw new Win32Exception(error, "Cannot remove saved Contour data.");
+                }
+                Attributes attributes;
+                if (!GetFileInformationByHandleEx(file, 9, out attributes, 8)) throw new Win32Exception();
+                if ((attributes.Value & 0x410) != 0) throw new IOException("Saved data is redirected or is not a file.");
+                var name = new StringBuilder(32768);
+                var length = GetFinalPathNameByHandle(file, name, (uint)name.Capacity, 0);
+                if (length == 0 || length >= name.Capacity) throw new IOException("Cannot verify saved data location.");
+                var final = name.ToString();
+                if (final.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase)) final = @"\\" + final.Substring(8);
+                else if (final.StartsWith(@"\\?\", StringComparison.Ordinal)) final = final.Substring(4);
+                if (!String.Equals(final, expected, StringComparison.OrdinalIgnoreCase)) throw new IOException("Saved data location changed. The file was kept.");
+                byte delete = 1;
+                if (!SetFileInformationByHandle(file, 4, ref delete, 1)) throw new Win32Exception();
+            }
+        }
+    }
+
     public sealed class RawValue {
         public uint Type;
         public string Data;

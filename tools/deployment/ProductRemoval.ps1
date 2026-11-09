@@ -3,6 +3,53 @@
 # partially removed runtime. Host callbacks own services; tests use HKCU only.
 . (Join-Path $PSScriptRoot 'SharedSetup.ps1')
 
+function Get-ProductUserProfiles {
+    # Machine-owned profile paths avoid accidentally targeting the administrator
+    # account used for UAC instead of the people who used Contour.
+    $machine=[Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine,[Microsoft.Win32.RegistryView]::Registry64)
+    try {
+        $profiles=$machine.OpenSubKey('SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList')
+        if ($null -eq $profiles) { throw 'Windows user profiles could not be located.' }
+        try {
+            foreach ($sid in $profiles.GetSubKeyNames()) {
+                if ($sid -notmatch '^S-1-5-21-(\d+-){3}\d+$' -and $sid -notmatch '^S-1-12-1-(\d+-){3}\d+$') { continue }
+                $key=$profiles.OpenSubKey($sid)
+                try {
+                    $path=[string]$key.GetValue('ProfileImagePath','')
+                    if (-not [IO.Path]::IsPathRooted($path) -or $path.Contains('%')) { throw 'A Windows profile path could not be resolved.' }
+                    if (Test-Path -LiteralPath $path) { $path }
+                } finally { $key.Dispose() }
+            }
+        } finally { $profiles.Dispose() }
+    } finally { $machine.Dispose() }
+}
+
+function Remove-ProductUserData([string[]]$ProfileDirectories) {
+    $files=[Collections.Generic.List[string]]::new()
+    foreach ($profile in $ProfileDirectories) {
+        $base=[IO.Path]::GetFullPath($profile).TrimEnd('\')
+        if ($base.Length -le 3 -or -not [IO.Path]::IsPathRooted($profile)) { throw 'Invalid Windows profile directory.' }
+        $directory=[IO.Path]::GetFullPath((Join-Path $base 'AppData\Local\Contour'))
+        if (-not $directory.StartsWith(($base+'\'),[StringComparison]::OrdinalIgnoreCase)) { throw 'User data cleanup is outside its Windows profile.' }
+        if (-not (Test-Path -LiteralPath $directory)) { continue }
+        # Never follow redirected profile/data directories. Delete only known
+        # library files, not exported profiles, other files, or an entire tree.
+        $ancestor=Get-Item -LiteralPath $directory -Force
+        while ($null -ne $ancestor) {
+            if ($ancestor.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Saved profiles are in a redirected folder. They were kept.' }
+            $ancestor=$ancestor.Parent
+        }
+        foreach ($file in Get-ChildItem -LiteralPath $directory -Force) {
+            if ($file.Name -cnotmatch '^profiles\.contour-library(?:\.(?:settings|drafts|lock))?(?:\.\{[0-9a-fA-F-]{36}\}\.tmp)?$') { continue }
+            if ($file.PSIsContainer -or ($file.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'A saved profile file is redirected. Saved profiles were kept.' }
+            $files.Add($file.FullName)
+        }
+    }
+    # Recheck the final file location through the same handle used to delete it,
+    # so a directory swap after preflight cannot redirect elevated deletion.
+    foreach ($file in $files) { [Contour.Deployment.UserDataFile]::Delete($file) }
+}
+
 function Remove-ProductStartupEntry($Store,[string]$Executable) {
     $path='Software\Microsoft\Windows\CurrentVersion\Run'
     $current=$Store.Read($path,'Contour')
