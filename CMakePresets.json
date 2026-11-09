@@ -12,12 +12,27 @@
       "generator": "Visual Studio 17 2022",
       "architecture": "x64",
       "binaryDir": "${sourceDir}/build/windows-x64"
+    },
+    {
+      "name": "ci-windows-x64",
+      "displayName": "Windows CI (MSVC developer environment)",
+      "generator": "Ninja Multi-Config",
+      "binaryDir": "${sourceDir}/build/ci",
+      "cacheVariables": {
+        "BUILD_TESTING": "ON",
+        "CONTOUR_BUILD_APP": "ON"
+      }
     }
   ],
   "buildPresets": [
     {
       "name": "windows-x64-release",
       "configurePreset": "windows-x64",
+      "configuration": "Release"
+    },
+    {
+      "name": "ci-windows-x64-release",
+      "configurePreset": "ci-windows-x64",
       "configuration": "Release"
     }
   ],
@@ -28,6 +43,13 @@
       "configuration": "Release",
       "output": { "outputOnFailure": true },
       "execution": { "noTestsAction": "error" }
+    },
+    {
+      "name": "ci-windows-x64-release",
+      "configurePreset": "ci-windows-x64",
+      "configuration": "Release",
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error", "jobs": 2 }
     }
   ]
 }

@@ -108,6 +108,8 @@ if(BUILD_TESTING)
     add_test(NAME desktop-model COMMAND contour-app-tests "${CMAKE_BINARY_DIR}/desktop-model-tests")
     find_program(CONTOUR_NODE_EXECUTABLE node)
     if(CONTOUR_NODE_EXECUTABLE)
+        add_test(NAME ci-draft-release COMMAND "${CONTOUR_NODE_EXECUTABLE}" --test
+            "${PROJECT_SOURCE_DIR}/tests/ci_draft_tests.cjs")
         add_test(NAME desktop-ui-bridge COMMAND "${CONTOUR_NODE_EXECUTABLE}"
             "${PROJECT_SOURCE_DIR}/tests/ui_bridge_tests.cjs" "${CMAKE_CURRENT_SOURCE_DIR}/ui")
         set_tests_properties(desktop-ui-bridge PROPERTIES TIMEOUT 30)
