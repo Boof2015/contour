@@ -45,7 +45,7 @@ try {
     }
     Case 'provision, runtime data cleanup, persisted recovery, and idempotent restoration' {
         $f=New-Fixture; Invoke-ControlContextApply $f.Store $f.Journal $f.Path
-        foreach ($name in @(($script:ControlContextId+',1'),($script:ControlContextId+',2'))) { $f.Store.Write($f.Plan.Keys[3],$name,3,'0001FF7F') }
+        foreach ($name in @(($script:ControlContextId+',1'),($script:ControlContextId+',2'),($script:ControlContextId+',5'))) { $f.Store.Write($f.Plan.Keys[3],$name,3,'0001FF7F') }
         $f.Journal.SavedProfileCleanup=$true; Save-ContourJournal $f.Journal $f.Path
         $f.Store.Write($f.Plan.Keys[2],($script:ControlContextId+',4'),3,'010203')
         $journal=Get-Content -LiteralPath $f.Path -Raw | ConvertFrom-Json

@@ -22,8 +22,10 @@ add_executable(contour-endpoint-check "${PROJECT_SOURCE_DIR}/tools/deployment/en
 contour_target(contour-endpoint-check)
 target_link_libraries(contour-endpoint-check PRIVATE contour-app-setup)
 enable_language(RC)
+configure_file(version.h.in "${CMAKE_CURRENT_BINARY_DIR}/version.h" @ONLY)
 add_executable(contour WIN32 main.cpp tray.cpp contour.rc)
 contour_target(contour)
+target_include_directories(contour PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 target_include_directories(contour SYSTEM PRIVATE "${webview2_SOURCE_DIR}/build/native/include")
 target_link_libraries(contour PRIVATE contour-app-model contour-app-setup
     "${webview2_SOURCE_DIR}/build/native/x64/WebView2LoaderStatic.lib"
@@ -32,6 +34,9 @@ add_custom_target(contour-ui-assets ALL
     COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:contour>/setup"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${PROJECT_SOURCE_DIR}/tools/deployment/contour-setup.ps1"
+        "${PROJECT_SOURCE_DIR}/tools/deployment/contour-uninstall.ps1"
+        "${PROJECT_SOURCE_DIR}/tools/deployment/SetupHost.ps1"
+        "${PROJECT_SOURCE_DIR}/tools/deployment/ProductRemoval.ps1"
         "${PROJECT_SOURCE_DIR}/tools/deployment/DeviceSetup.ps1"
         "${PROJECT_SOURCE_DIR}/tools/deployment/AudioPolicy.ps1"
         "${PROJECT_SOURCE_DIR}/tools/deployment/SharedSetup.ps1"
@@ -49,7 +54,38 @@ add_custom_target(contour-ui-assets ALL
     COMMAND ${CMAKE_COMMAND} -E copy_if_different "${webview2_SOURCE_DIR}/LICENSE.txt" "$<TARGET_FILE_DIR:contour>/licenses/WebView2.txt"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different "${webview2_SOURCE_DIR}/NOTICE.txt" "$<TARGET_FILE_DIR:contour>/licenses/WebView2-NOTICE.txt")
 add_dependencies(contour contour-ui-assets contour-apo contour-deploy-info contour-apo-host contour-endpoint-check)
+add_custom_target(contour-release-package
+    COMMAND powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File
+        "${PROJECT_SOURCE_DIR}/tools/distribution/stage-release.ps1"
+        -BinaryDirectory "$<TARGET_FILE_DIR:contour>"
+        -OutputDirectory "${CMAKE_BINARY_DIR}/distribution/$<CONFIG>/Contour-${PROJECT_VERSION}-windows-x64"
+        -Version "${PROJECT_VERSION}" -Configuration "$<CONFIG>"
+    DEPENDS contour
+    VERBATIM)
+set(CONTOUR_ISCC "" CACHE FILEPATH "Path to Inno Setup 7.1+ ISCC.exe")
+set(CONTOUR_PREREQUISITE_DIRECTORY "" CACHE PATH "Folder containing Microsoft-signed vc_redist.x64.exe and MicrosoftEdgeWebview2Setup.exe")
+if(CONTOUR_ISCC AND CONTOUR_PREREQUISITE_DIRECTORY)
+    add_custom_target(contour-installer
+        COMMAND powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File
+            "${PROJECT_SOURCE_DIR}/tools/distribution/build-installer.ps1"
+            -PayloadDirectory "${CMAKE_BINARY_DIR}/distribution/$<CONFIG>/Contour-${PROJECT_VERSION}-windows-x64"
+            -OutputDirectory "${CMAKE_BINARY_DIR}/distribution/installer"
+            -Iscc "${CONTOUR_ISCC}" -PrerequisiteDirectory "${CONTOUR_PREREQUISITE_DIRECTORY}"
+        DEPENDS contour-release-package
+        VERBATIM)
+endif()
 if(BUILD_TESTING)
+    if(CONTOUR_ISCC)
+        add_test(NAME distribution-installer COMMAND powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File
+            "${PROJECT_SOURCE_DIR}/tests/installer_tests.ps1"
+            -Iscc "${CONTOUR_ISCC}" -WorkDirectory "${CMAKE_BINARY_DIR}/installer-tests")
+        set_tests_properties(distribution-installer PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE)
+    endif()
+    add_test(NAME distribution-payload COMMAND powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File
+        "${PROJECT_SOURCE_DIR}/tests/release_payload_tests.ps1"
+        -BinaryDirectory "$<TARGET_FILE_DIR:contour>"
+        -WorkDirectory "${CMAKE_BINARY_DIR}/release-payload-tests")
+    set_tests_properties(distribution-payload PROPERTIES TIMEOUT 60)
     add_executable(contour-lifecycle-tests "${PROJECT_SOURCE_DIR}/tests/lifecycle_tests.cpp")
     contour_target(contour-lifecycle-tests)
     target_link_libraries(contour-lifecycle-tests PRIVATE user32)

@@ -69,7 +69,9 @@ function Invoke-ControlContextRestore($Store, $Journal, [string] $JournalPath) {
     foreach ($key in $Journal.KeyIntents) { if ($Journal.Plan.Keys -cnotcontains $key) { throw 'Invalid context key intent.' } }
     foreach ($index in $Journal.ValueIntents) { if ([int]$index -notin @(0,1)) { throw 'Invalid context value intent.' } }
     $volatile=$Journal.Plan.Keys[3]
-    $names=@(($script:ControlContextId+',1'),($script:ControlContextId+',2'))
+    # Preview request, status, and the engine identity published by current APOs.
+    # Keep this explicit: unrelated values must still stop context deletion.
+    $names=@(($script:ControlContextId+',1'),($script:ControlContextId+',2'),($script:ControlContextId+',5'))
     foreach ($name in $Journal.RuntimeIntents) { if ($names -cnotcontains $name) { throw 'Invalid runtime cleanup intent.' } }
     # Persistent user data is preserved unless this fresh-context experiment
     # explicitly journaled ownership before its first test Save. Older journals
@@ -116,7 +118,12 @@ function Invoke-ControlContextRestore($Store, $Journal, [string] $JournalPath) {
         catch { $Journal.Conflicts+=@($_.Exception.Message) }
     }
     $fx=(Get-EndpointPath $Journal.Plan.EndpointId)+'\FxProperties'
-    if ($Store.Security($fx) -cne $Journal.Plan.ParentSecurity) { $Journal.Conflicts+=@('Existing endpoint security differs from baseline.') }
+    # A device that Windows has removed entirely has no remaining context or
+    # parent ACL to restore. Never recreate it just to finish uninstallation.
+    if ($Store.Exists((Get-EndpointPath $Journal.Plan.EndpointId)) -and
+        (-not $Store.Exists($fx) -or $Store.Security($fx) -cne $Journal.Plan.ParentSecurity)) {
+        $Journal.Conflicts+=@('Existing endpoint security differs from baseline.')
+    }
     $Journal.State=if ($Journal.Conflicts.Count -eq 0) { 'Restored' } else { 'RecoveryRequired' }
     Save-ContourJournal $Journal $JournalPath
     return $Journal.Conflicts.Count -eq 0

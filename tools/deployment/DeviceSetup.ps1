@@ -45,7 +45,8 @@ function Get-HandoffSetupStatus($State) {
             else { 'An installation update needs to finish before this device can be managed.' }}
 }
 function Assert-SetupState($State, [string] $Package) {
-    if ($State.Schema -eq 3) { Assert-SharedSetupRecord $State }
+    if ($State.Schema -eq 4) { Assert-ProductRemovalRecord $State }
+    elseif ($State.Schema -eq 3) { Assert-SharedSetupRecord $State }
     elseif ($State.Schema -eq 2) { Assert-HandoffSetupRecord $State } else { Assert-LegacySetupRecord $State }
     $expected=Join-Path ([Environment]::GetFolderPath('ProgramFiles')) ('ContourLab-'+([guid]::Parse($State.Id)).ToString('D'))
     if ($Package -cne $expected) { throw 'Setup record is outside its protected package.' }
