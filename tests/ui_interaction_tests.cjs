@@ -7,6 +7,7 @@ if(!edge)throw Error('Microsoft Edge is required for the UI interaction checks')
 fs.mkdirSync(work,{recursive:true});
 const profile=fs.mkdtempSync(path.join(work,'browser-'));
 const fixture=()=>{
+  if(new URL(location.href).searchParams.has('light'))localStorage.setItem('theme','light');
   const filter=(gain=0)=>({type:'PK',on:true,freq:1000,gain,q:1});
   const state={device:'test-output',devices:[{id:'test-output',name:'Offline test output',channels:2,rate:48000,mask:3,available:false}],profiles:[],closing:{state:'open'},status:{endpoint:'ready',applied:true,running:'processed_match',saved:'matches',copy:'current'},editor:{id:'test-profile',name:'Test profile',channels:2,rate:48000,curveRate:48000,revision:1,dirty:false,undo:false,redo:false,work:{bypass:false,layers:['A','B','C'].map(name=>({name,all:true,mask:0,gain:0,on:true,filters:[filter()]}))}}};
   state.profiles=[{id:'test-profile',name:'Test profile',channels:2,revision:1,layers:3,filters:3,canDelete:false,usedBy:[{id:'test-output',name:'Offline test output',available:true}]},
@@ -17,6 +18,7 @@ const fixture=()=>{
   state.devices.push({id:'test-second',name:'Second test device',channels:2,rate:48000,mask:3,available:true},{id:'test-disconnected',name:'Disconnected test device',channels:0,rate:0,mask:0,available:false,state:8});
   const installed=new Set(['test-output']);
   let engineUpdate=new URL(location.href).searchParams.has('engine-update');
+  if(new URL(location.href).searchParams.has('frame'))window.addEventListener('load',()=>windowState({custom:true,maximized:false}));
   if(engineUpdate)window.addEventListener('load',()=>openSettings('outputs'));
   if(new URL(location.href).searchParams.has('profiles'))window.addEventListener('load',()=>openProfiles());
   if(new URL(location.href).searchParams.has('adapt'))window.addEventListener('load',async()=>{await openProfiles();await openAdapt('test-assigned');});
@@ -30,7 +32,7 @@ const fixture=()=>{
   let receive;window.testEdits=[];window.testRequests=[];window.testState=state;
   window.chrome.webview={addEventListener:(_,fn)=>receive=fn,postMessage:body=>{
     const r=JSON.parse(body);window.testRequests.push(r);let data=state;
-    if(r.op==='window')data={custom:false,maximized:false};
+    if(r.op==='window')data={custom:new URL(location.href).searchParams.has('frame'),maximized:false};
     if(r.op==='edit'){state.editor.work=r.work;state.editor.revision++;state.editor.dirty=true;window.testEdits.push(structuredClone(r.work));}
     if(r.op==='eq')state.eqEnabled=r.enabled;
     if(r.op==='device'&&window.holdDeviceSwitch)state.closing={state:'waiting',switching:true};
@@ -412,7 +414,7 @@ const checks=async()=>{
     finish();
   }catch(error){finish(error);}
 };
-const mime={'.js':'text/javascript','.css':'text/css','.ttf':'font/ttf'};
+const mime={'.js':'text/javascript','.css':'text/css','.ttf':'font/ttf','.svg':'image/svg+xml'};
 const server=http.createServer((req,res)=>{
   const url=new URL(req.url,'http://localhost');
   if(url.pathname==='/'){
@@ -421,7 +423,7 @@ const server=http.createServer((req,res)=>{
   }
   if(url.pathname==='/fixture.js'){res.setHeader('Content-Type','text/javascript');res.end(`(${fixture.toString()})();`);return;}
   if(url.pathname==='/checks.js'){res.setHeader('Content-Type','text/javascript');res.end(`(${checks.toString()})();`);return;}
-  const relative=url.pathname.slice(1);if(!['boot.js','editor.js','settings.js','app.js','interactions.js','styles.css','fonts/Manrope.ttf'].includes(relative)){res.writeHead(404).end();return;}
+  const relative=url.pathname.slice(1);if(!['boot.js','editor.js','settings.js','app.js','interactions.js','styles.css','wordmark.svg','fonts/Manrope.ttf'].includes(relative)){res.writeHead(404).end();return;}
   res.setHeader('Content-Type',mime[path.extname(relative)]);res.end(fs.readFileSync(path.join(ui,relative)));
 });
 server.listen(0,'127.0.0.1',()=>{

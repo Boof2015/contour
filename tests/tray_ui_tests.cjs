@@ -9,6 +9,7 @@ const fixture=()=>{
     devices:[{id:'focusrite',name:'Speakers (Focusrite USB Audio)',available:true,channels:2},{id:'other',name:'Other installed output',available:true,channels:2},{id:'gone',name:'Disconnected output',available:false,channels:2}],
     profiles:[{id:'one',name:'My EQ'},{id:'two',name:'Alternative <EQ>'}],
     profile:{id:'one',name:'My EQ',revision:7,dirty:false,layers:[{name:'Left correction',target:'Left',on:true},{name:'Right correction',target:'Right',on:true},{name:'Personal EQ',target:'All',on:true}]}};
+  if(new URL(location.href).searchParams.has('light'))data.theme='light';
   let receive;window.requests=[];window.fixtureState=data;window.emit=()=>receive({data:structuredClone(data)});
   window.chrome.webview={addEventListener:(_,fn)=>receive=fn,postMessage:body=>{
     const r=JSON.parse(body);window.requests.push(r);
@@ -52,8 +53,8 @@ const server=http.createServer((req,res)=>{
     res.setHeader('Content-Type','text/html');res.end(fs.readFileSync(path.join(ui,'tray.html'),'utf8').replace('</head>','<style>body.tray-surface{width:368px;max-width:100%}</style></head>').replace('<script src="editor.js">','<script src="fixture.js"></script><script src="editor.js">').replace('</body>',preview?'</body>':'<script src="checks.js"></script></body>'));return;
   }
   if(pathname==='/fixture.js'||pathname==='/checks.js'){res.setHeader('Content-Type','text/javascript');res.end(`(${(pathname==='/fixture.js'?fixture:checks).toString()})();`);return;}
-  const relative=pathname.slice(1);if(!['styles.css','editor.js','tray.js','fonts/Manrope.ttf'].includes(relative)){res.writeHead(404).end();return;}
-  res.setHeader('Content-Type',relative.endsWith('.css')?'text/css':relative.endsWith('.js')?'text/javascript':'font/ttf');res.end(fs.readFileSync(path.join(ui,relative)));
+  const relative=pathname.slice(1);if(!['styles.css','editor.js','tray.js','wordmark.svg','fonts/Manrope.ttf'].includes(relative)){res.writeHead(404).end();return;}
+  res.setHeader('Content-Type',relative.endsWith('.css')?'text/css':relative.endsWith('.js')?'text/javascript':relative.endsWith('.svg')?'image/svg+xml':'font/ttf');res.end(fs.readFileSync(path.join(ui,relative)));
 });
 server.listen(0,'127.0.0.1',()=>{
   const url=`http://127.0.0.1:${server.address().port}/`;

@@ -110,7 +110,7 @@ function glyph(f, i) {
   const d = { PK: 'M1 11 C8 11 10 3 13 3 S18 11 25 11', LSQ: 'M1 4 C8 4 11 11 15 11 L25 11', HSQ: 'M1 11 L11 11 C15 11 18 4 25 4', LPQ: 'M1 5 L12 5 C17 5 18 13 25 13', HPQ: 'M1 13 C8 13 9 5 14 5 L25 5', NO: 'M1 4 L10 4 C12 4 12.4 13 13 13 S14 4 16 4 L25 4', AP: 'M1 7 L25 7', BP: 'M1 13 C8 13 10 3 13 3 S18 13 25 13' }[f.type];
   return `<svg class="glyph" data-glyph="${i}" viewBox="0 0 26 14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="${hasGain(f.type) ? flip(d) : d}"/></svg>`;
 }
-const MARK = '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M10 2.2c4.6 0 7.8 3.2 7.8 7.4 0 4.6-3.6 8.2-8.2 8.2-4.3 0-7.4-3.1-7.4-7.2 0-4.8 3.4-8.4 7.8-8.4z"/><path d="M10.4 5.6c2.6 0 4.4 1.8 4.4 4.2 0 2.6-2 4.6-4.6 4.6-2.4 0-4.2-1.7-4.2-4 0-2.7 1.9-4.8 4.4-4.8z"/><circle cx="10.6" cy="9.9" r="1.3" fill="currentColor" stroke="none"/></svg>';
+const WORDMARK = '<span class="wordmark" role="img" aria-label="Contour"></span>';
 function pathOf(r, g, w, h, z) {
   const y = v => (h / 2 - clamp(v, -z, z) / z * (h / 2 - 3)).toFixed(2);
   let d = ''; for (let i = 0; i < g.n; i++) d += (i ? 'L' : 'M') + (i / (g.n - 1) * w).toFixed(1) + ' ' + y(r[i]);

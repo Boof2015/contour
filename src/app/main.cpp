@@ -2,6 +2,7 @@
 #include "setup.h"
 #include "tray.h"
 #include "startup.h"
+#include "resource.h"
 #include "../eq/file_storage.h"
 #include <WebView2.h>
 #include <wrl.h>
@@ -445,9 +446,13 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int show) {
         if(mutex_error==ERROR_ALREADY_EXISTS){if(!launch.startup)PostMessageW(HWND_BROADCAST,app.activate_message,0,0);CoUninitialize();return 0;}
         app.model=std::make_unique<contour::app::Model>(app.data/L"profiles.contour-library",contour::app::enumerate_devices());
         app.start_hidden=app.model->start_in_tray();
-        WNDCLASSW cls{}; cls.lpfnWndProc=window_proc; cls.hInstance=instance; cls.lpszClassName=L"ContourEditor";
+        WNDCLASSEXW cls{sizeof(cls)}; cls.lpfnWndProc=window_proc; cls.hInstance=instance; cls.lpszClassName=L"ContourEditor";
+        cls.hIcon=static_cast<HICON>(LoadImageW(instance,MAKEINTRESOURCEW(IDI_CONTOUR),IMAGE_ICON,
+            GetSystemMetrics(SM_CXICON),GetSystemMetrics(SM_CYICON),LR_SHARED));
+        cls.hIconSm=static_cast<HICON>(LoadImageW(instance,MAKEINTRESOURCEW(IDI_CONTOUR),IMAGE_ICON,
+            GetSystemMetrics(SM_CXSMICON),GetSystemMetrics(SM_CYSMICON),LR_SHARED));
         cls.hCursor=LoadCursorW(nullptr,IDC_ARROW); cls.hbrBackground=static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
-        RegisterClassW(&cls);
+        RegisterClassExW(&cls);
         const auto dpi=GetDpiForSystem();
         // Parent background erasure must never paint over WebView's child HWND.
         app.window=CreateWindowExW(0,cls.lpszClassName,L"Contour",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,

@@ -1,9 +1,9 @@
 #include "tray.h"
+#include "resource.h"
 #include <wrl.h>
 #include <shellapi.h>
 #include <dwmapi.h>
 #include <windowsx.h>
-#include <gdiplus.h>
 #include <algorithm>
 
 namespace contour::app {
@@ -13,32 +13,10 @@ namespace {
 constexpr UINT tray_event=WM_APP+11,tray_menu=WM_APP+12;
 constexpr auto tray_page=L"https://contour.invalid/tray.html";
 HICON make_icon() {
-    // Draw the existing vector mark at high resolution, with an opaque dark
-    // disc so the same icon remains legible on light and dark taskbars.
-    Gdiplus::GdiplusStartupInput input; ULONG_PTR token=0;
-    if(Gdiplus::GdiplusStartup(&token,&input,nullptr)!=Gdiplus::Ok)return nullptr;
-    HICON icon=nullptr;
-    {
-        Gdiplus::Bitmap bitmap(64,64,PixelFormat32bppARGB);
-        Gdiplus::Graphics g(&bitmap);g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-        g.Clear(Gdiplus::Color(0,0,0,0));g.ScaleTransform(3.2F,3.2F);
-        Gdiplus::SolidBrush bg(Gdiplus::Color(255,28,28,32)),fg(Gdiplus::Color(255,236,236,240));
-        g.FillEllipse(&bg,0.0F,0.0F,20.0F,20.0F);
-        Gdiplus::Pen pen(Gdiplus::Color(255,236,236,240),1.4F);
-        Gdiplus::GraphicsPath mark;
-        mark.AddBezier(10.0F,2.2F,13.6F,2.2F,17.8F,5.4F,17.8F,9.6F);
-        mark.AddBezier(17.8F,9.6F,17.8F,14.2F,14.2F,18.0F,9.6F,18.0F);
-        mark.AddBezier(9.6F,18.0F,5.3F,18.0F,2.2F,14.9F,2.2F,10.8F);
-        mark.AddBezier(2.2F,10.8F,2.2F,6.0F,5.2F,2.2F,10.0F,2.2F);
-        mark.CloseFigure();g.DrawPath(&pen,&mark);
-        mark.Reset();mark.AddBezier(10.4F,5.6F,13.0F,5.6F,15.2F,7.4F,15.0F,9.8F);
-        mark.AddBezier(15.0F,9.8F,15.0F,12.4F,12.8F,14.4F,10.4F,14.4F);
-        mark.AddBezier(10.4F,14.4F,8.0F,14.4F,6.2F,12.7F,6.2F,10.4F);
-        mark.AddBezier(6.2F,10.4F,6.2F,7.7F,7.8F,5.6F,10.4F,5.6F);
-        mark.CloseFigure();g.DrawPath(&pen,&mark);g.FillEllipse(&fg,9.3F,8.6F,2.6F,2.6F);
-        bitmap.GetHICON(&icon);
-    }
-    Gdiplus::GdiplusShutdown(token);return icon;
+    // Use the same embedded C as Explorer and the app window. Its dark backing
+    // keeps the mark readable on both light and dark taskbars.
+    return static_cast<HICON>(LoadImageW(GetModuleHandleW(nullptr),MAKEINTRESOURCEW(IDI_CONTOUR),IMAGE_ICON,
+        GetSystemMetrics(SM_CXSMICON),GetSystemMetrics(SM_CYSMICON),0));
 }
 }
 TrayHost::TrayHost(HWND owner,std::filesystem::path assets,std::function<void(const Json&)> action)

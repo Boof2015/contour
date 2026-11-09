@@ -21,12 +21,13 @@ target_link_libraries(contour-app-setup PUBLIC contour-app-model shell32 user32)
 add_executable(contour-endpoint-check "${PROJECT_SOURCE_DIR}/tools/deployment/endpoint_check.cpp")
 contour_target(contour-endpoint-check)
 target_link_libraries(contour-endpoint-check PRIVATE contour-app-setup)
-add_executable(contour WIN32 main.cpp tray.cpp)
+enable_language(RC)
+add_executable(contour WIN32 main.cpp tray.cpp contour.rc)
 contour_target(contour)
 target_include_directories(contour SYSTEM PRIVATE "${webview2_SOURCE_DIR}/build/native/include")
 target_link_libraries(contour PRIVATE contour-app-model contour-app-setup
     "${webview2_SOURCE_DIR}/build/native/x64/WebView2LoaderStatic.lib"
-    shlwapi version user32 shell32 dwmapi gdiplus)
+    shlwapi version user32 shell32 dwmapi)
 add_custom_target(contour-ui-assets ALL
     COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:contour>/setup"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different

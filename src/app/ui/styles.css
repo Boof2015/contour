@@ -60,8 +60,8 @@ ul { margin: 0; padding: 0; list-style: none; }
 .win { position: fixed; top: 52px; left: 20px; right: 20px; bottom: 20px; display: flex; flex-direction: column; overflow: hidden; border-radius: 10px; background: var(--bg); color: var(--text); font: 500 13px/1.4 Manrope, system-ui, sans-serif; box-shadow: 0 24px 70px rgba(0,0,0,.45), 0 0 0 1px rgba(255,255,255,.06); }
 :root[data-theme="light"] .win { box-shadow: 0 24px 60px rgba(0,0,0,.18), 0 0 0 1px rgba(0,0,0,.08); }
 .tb { height: 48px; display: flex; align-items: center; gap: 8px; padding-left: 16px; flex: none; }
-.brand { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 15px; letter-spacing: -.01em; margin-right: 12px; }
-.brand svg { width: 18px; height: 18px; }
+.brand { display:flex; align-items:center; flex:none; margin-right:12px; }
+.wordmark { display:block; flex:none; width:124px; aspect-ratio:1409 / 173; background:currentColor; -webkit-mask:url("wordmark.svg") center / contain no-repeat; mask:url("wordmark.svg") center / contain no-repeat; }
 .chip { height: 32px; display: flex; align-items: center; gap: 8px; padding: 0 10px 0 12px; border-radius: 10px; background: var(--ctl); font-weight: 600; }
 .chip:hover, .chip.open { background: var(--ctl-h); }
 .chip .sub { color: var(--text-2); font-weight: 500; }
@@ -357,7 +357,6 @@ ul { margin: 0; padding: 0; list-style: none; }
 .tray { position: fixed; z-index: 50; right: 28px; bottom: 28px; width: 344px; padding: 12px; border-radius: 14px; background: var(--pop); box-shadow: 0 24px 70px rgba(0,0,0,.55), 0 0 0 1px rgba(255,255,255,.06); animation: pop .16s cubic-bezier(.22,1,.36,1); }
 :root[data-theme="light"] .tray { box-shadow: 0 20px 60px rgba(0,0,0,.2), 0 0 0 1px rgba(0,0,0,.06); }
 .tray-h { display: flex; align-items: center; gap: 8px; padding: 2px 4px 8px; font-weight: 800; font-size: 14px; }
-.tray-h svg { width: 17px; height: 17px; }
 .tray-h .sw { margin-left: auto; }
 .tray .sec { padding: 10px 6px 4px; font-size: 12px; font-weight: 600; color: var(--text-3); display: flex; }
 .tray .sec span { margin-left: auto; }
