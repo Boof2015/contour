@@ -3,6 +3,7 @@
     <source media="(prefers-color-scheme: dark)" srcset=".github/images/wordmark-dark.svg">
     <img src=".github/images/wordmark-light.svg" alt="Contour" width="320">
   </picture>
+  <br><br>
 
 
 Contour is a system wide parametric equalizer for Windows.
