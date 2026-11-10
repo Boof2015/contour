@@ -25,10 +25,11 @@ function Run([string]$Exe,[string]$Extra='') {
     ++$script:logNumber
     $log=Join-Path $work ('run-'+$script:logNumber+'.log')
     $arguments='/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LOG="'+$log+'" '+$Extra
-    $process=Start-Process -FilePath $Exe -ArgumentList $arguments -WindowStyle Hidden -PassThru
-    # All processes here are this test's private installer/uninstaller, never the app.
-    if (-not $process.WaitForExit(30000)) { $process.Kill();throw ('Fixture timed out: '+$log) }
-    $process.Refresh();return $process.ExitCode
+    # Inno's original uninstaller exits before its temporary child deletes the
+    # original EXE. Wait for the whole tree, or the next install can race that
+    # cleanup. CTest bounds this isolated lifecycle suite with a 180-second timeout.
+    $process=Start-Process -FilePath $Exe -ArgumentList $arguments -WindowStyle Hidden -Wait -PassThru
+    try { $process.Refresh();return $process.ExitCode } finally { $process.Dispose() }
 }
 function Start-Editor([string]$Executable,[string]$Control) {
     [IO.File]::Delete((Join-Path $Control 'editor-ready'))
@@ -125,6 +126,7 @@ try {
     Clear-FixtureFlag removal-fail
     $code=Run $uninstaller
     Check ($code -eq 0 -and (Read removed) -eq 'done' -and (InstalledVersion) -eq '' -and -not (Test-Path -LiteralPath (Join-Path $app 'contour.exe')) -and -not (Test-Path -LiteralPath $shortcut)) 'retry removes the app and shortcut after successful engine removal'
+    Check (-not (Test-Path -LiteralPath $uninstaller)) 'uninstaller child finishes deleting itself before the next installation'
     Check ((Read profile) -eq 'keep my EQ' -and (Test-Path -LiteralPath (Join-Path $app 'foreign-file.txt'))) 'uninstall preserves profiles and unrecognized files'
     Assert ((Run $v2) -eq 0) 'Cannot reinstall cleanup fixture'
     Put editor-hung
@@ -135,6 +137,11 @@ try {
     Check ((Read profile) -eq '') 'reinstall after cleanup does not resurrect saved profiles'
     Assert ((Run (Join-Path $app 'unins000.exe')) -eq 0) 'Cannot remove final fixture'
     Write-Output "PASS $passed native installer lifecycle checks; no actual audio, startup, Start menu, or profile settings changed"
+} catch {
+    Write-Output ('Installer fixture directory: '+$work)
+    $lastLog=Join-Path $work ('run-'+$script:logNumber+'.log')
+    if (Test-Path -LiteralPath $lastLog) { Get-Content -LiteralPath $lastLog -Tail 60 | Write-Output }
+    throw
 } finally {
     foreach ($editor in $editors) { if (-not $editor.HasExited) { $editor.Kill();[void]$editor.WaitForExit(5000) };$editor.Dispose() }
     # The exact randomly named fixture key is the only registry cleanup target.
