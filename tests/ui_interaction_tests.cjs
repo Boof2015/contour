@@ -24,6 +24,7 @@ const fixture=()=>{
   if(new URL(location.href).searchParams.has('adapt'))window.addEventListener('load',async()=>{await openProfiles();await openAdapt('test-assigned');});
   if(new URL(location.href).searchParams.has('layer-menu'))window.addEventListener('load',()=>{S.pop='layermenu';renderOver();});
   if(new URL(location.href).searchParams.has('general'))window.addEventListener('load',()=>openSettings('general'));
+  if(new URL(location.href).searchParams.has('info'))window.addEventListener('load',()=>openSettings('info'));
   if(new URL(location.href).searchParams.has('recovery'))state.recoveries=[{id:'recovery-1',name:'My EQ',device:'Offline test output'}];
   if(new URL(location.href).searchParams.has('uninstalled')){
     installed.delete('test-output');state.editor=null;state.status={endpoint:'unavailable'};
@@ -33,6 +34,12 @@ const fixture=()=>{
   window.chrome.webview={addEventListener:(_,fn)=>receive=fn,postMessage:body=>{
     const r=JSON.parse(body);window.testRequests.push(r);let data=state;
     if(r.op==='window')data={custom:new URL(location.href).searchParams.has('frame'),maximized:false};
+    if(r.op==='information'){
+      if(r.action==='state')data={version:'0.7.3-test',architecture:'x64',windows:'24H2 · build 26100.1234',webview:'140.0.1234.5'};
+      if(r.action==='notices')data=[{name:'Test component',text:'License <img src=x onerror="window.unsafeNotice=true">\nSecond line'}];
+      if(r.action==='state'&&window.holdInformation){window.releaseInformation=()=>receive({data:{requestId:r.requestId,ok:true,data}});return;}
+      if(r.action==='copy'&&window.failCopy){setTimeout(()=>receive({data:{requestId:r.requestId,ok:false,error:'Clipboard is busy'}}),0);return;}
+    }
     if(r.op==='edit'){state.editor.work=r.work;state.editor.revision++;state.editor.dirty=true;window.testEdits.push(structuredClone(r.work));}
     if(r.op==='eq')state.eqEnabled=r.enabled;
     if(r.op==='device'&&window.holdDeviceSwitch)state.closing={state:'waiting',switching:true};
@@ -240,6 +247,25 @@ const checks=async()=>{
     assert(JSON.stringify(P().work)===preferenceWork&&P().dirty===preferenceDirty,'Startup preferences edited the profile');
     results.push('Startup defaults are off, controls remain independent, and registration failure preserves the actual state');
     $('[data-theme-choice="light"]').click();assert(document.documentElement.dataset.theme==='light','General appearance preference failed');
+    await wait(30);const infoStart=window.testRequests.length;
+    $('[data-settings-tab="info"]').click();await wait(60);
+    assert($('#infoPanel').textContent.includes('0.7.3-test')&&$('#infoPanel').textContent.includes('26100.1234'),'Info did not use the native version and OS details');
+    const infoNode=$('#infoPanel'),text=$('#infoDiagnostics').textContent;
+    assert(!text.includes('test-profile')&&!text.includes('test-output')&&!text.includes('freq'),'Diagnostics contain profile data or device identifiers');
+    window.testStatus(window.testState.status);await wait(30);assert($('#infoPanel')===infoNode,'Background status rebuilt Info');
+    $('[data-info-copy]').click();await wait(30);
+    assert(window.testRequests.findLast(r=>r.op==='information'&&r.action==='copy').text===text,'Copied diagnostics differ from the visible preview');
+    window.failCopy=true;$('[data-info-copy]').click();await wait(30);
+    assert(!window.document.querySelector('[data-info-copy]').disabled&&$('#toast').textContent.includes('Clipboard is busy'),'Clipboard failure stranded the copy action');window.failCopy=false;
+    $('[data-info-link="project"]').click();await wait(30);$('[data-info-link="issues"]').click();await wait(30);
+    assert(window.testRequests.filter(r=>r.op==='information'&&r.action==='link').map(r=>r.name).join(',')==='project,issues','Project links did not use the native allowlist');
+    $('.info-notices').open=true;await wait(40);
+    assert($('.info-license pre').textContent.includes('<img')&&!$('.info-license img')&&!window.unsafeNotice,'License contents were treated as HTML');
+    assert(window.testRequests.slice(infoStart).every(r=>r.op==='information')&&JSON.stringify(P().work)===preferenceWork,'Info changed a profile or started device/startup work: '+JSON.stringify(window.testRequests.slice(infoStart).map(r=>[r.op,r.action])));
+    $('[data-settings-tab="general"]').click();await wait(30);INFO=null;window.holdInformation=true;
+    $('[data-settings-tab="info"]').click();await wait(20);$('[data-settings-tab="general"]').click();await wait(20);window.releaseInformation();await wait(30);
+    assert(S.settingsTab==='general'&&$('[data-start-in-tray]')&&!$('#infoPanel'),'A delayed Info response replaced another settings tab');window.holdInformation=false;
+    results.push('Info uses native metadata, copies only reviewed diagnostics, handles clipboard failure, opens allowlisted links, escapes licenses and preserves settings/drafts across delayed replies');
     $('[data-act="back-eq"]').click();await wait(60);assert($('#graph')&&APP.eqEnabled===false&&JSON.stringify(P().work)===workBefore,'Returning from Settings lost the editor or master state');
     results.push('Global EQ is independent of profiles; single Install; uninstall review clears on start and progress stays stable through verification');
 

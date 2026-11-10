@@ -2,6 +2,7 @@
 #include "setup.h"
 #include "tray.h"
 #include "startup.h"
+#include "app_info.h"
 #include "resource.h"
 #include "../eq/file_storage.h"
 #include <WebView2.h>
@@ -20,7 +21,7 @@ using Microsoft::WRL::ComPtr;
 using Microsoft::WRL::Callback;
 using contour::app::Json;
 constexpr auto page=L"https://contour.invalid/index.html";
-constexpr UINT start_frame_drag=WM_APP+1,open_system_menu=WM_APP+2,show_export_dialog=WM_APP+3,quit_application=WM_APP+4;
+constexpr UINT start_frame_drag=WM_APP+1,open_system_menu=WM_APP+2,show_export_dialog=WM_APP+3,quit_application=WM_APP+4,open_project_link=WM_APP+5;
 struct App {
     HWND window=nullptr;
     std::unique_ptr<contour::app::Model> model;
@@ -39,6 +40,19 @@ struct App {
     COLORREF background_color=RGB(22,22,24);
     struct ExportJob { Json request_id; std::string text; std::wstring filename; bool filters=false; };
     std::optional<ExportJob> export_job;
+    std::string webview_version;
+    struct LinkJob { Json request_id;std::string name; };
+    std::optional<LinkJob> link_job;
+    void open_link() noexcept {
+        if(!link_job)return;
+        const auto job=std::move(*link_job);link_job.reset();
+        try {
+            contour::app::open_information_link(window,job.name);
+            send({{"requestId",job.request_id},{"ok",true},{"data",Json::object()}});
+        } catch(const std::exception& e) {
+            try {send({{"requestId",job.request_id},{"ok",false},{"error",e.what()}});}catch(...){}
+        }
+    }
     void show_editor() {
         start_hidden=false;
         if(tray)tray->hide();
@@ -174,6 +188,23 @@ struct App {
                 else { throw std::invalid_argument("Unknown window action"); }
                 send({{"requestId",request_id},{"ok",true},{"data",window_state()}}); return;
             }
+            if(request.at("op")=="information") {
+                const auto action=request.at("action").get<std::string>();
+                Json result=Json::object();
+                if(action=="state")result=contour::app::application_info(webview_version);
+                else if(action=="notices")result=contour::app::third_party_notices(assets);
+                else if(action=="copy")contour::app::copy_information(window,request.at("text").get<std::string>());
+                else if(action=="link") {
+                    const auto name=request.at("name").get<std::string>();
+                    (void)contour::app::information_link(name);
+                    if(link_job)throw std::runtime_error("A project link is already opening");
+                    link_job=LinkJob{request_id,name};
+                    // Browser association UI must run outside the WebView callback.
+                    if(!PostMessageW(window,open_project_link,0,0)){link_job.reset();throw std::runtime_error("Could not open the project link");}
+                    return;
+                }else throw std::invalid_argument("Unknown information action");
+                send({{"requestId",request_id},{"ok",true},{"data",result}});return;
+            }
             if (request.at("op")=="setup") {
                 if (model->state(false)["closing"]["state"]!="open") { throw std::runtime_error("Finish or cancel closing before device setup"); }
                 const auto endpoint=contour::app::wide(request.at("endpoint").get<std::string>());
@@ -225,6 +256,9 @@ struct App {
         const auto hr=CreateCoreWebView2EnvironmentWithOptions(nullptr,cache.c_str(),nullptr,
             Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>([this](HRESULT result,ICoreWebView2Environment* environment)->HRESULT {
                 if (FAILED(result) || !environment) { fail("The Microsoft Edge WebView2 Runtime could not start."); return S_OK; }
+                wchar_t* version=nullptr;
+                if(SUCCEEDED(environment->get_BrowserVersionString(&version))&&version)webview_version=contour::app::utf8(version);
+                CoTaskMemFree(version);
                 const ComPtr<ICoreWebView2Environment> shared_environment=environment;
                 return environment->CreateCoreWebView2Controller(window,
                     Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>([this,shared_environment](HRESULT created,ICoreWebView2Controller* control)->HRESULT {
@@ -332,6 +366,7 @@ LRESULT CALLBACK window_proc(HWND window,UINT message,WPARAM w,LPARAM l) {
         return 0;
     }
     case show_export_dialog: app->export_document(); return 0;
+    case open_project_link: app->open_link(); return 0;
     case WM_SIZE: app->resize(); if (app->ready) { app->send_window_state(); } return 0;
     case WM_MOVE: if (app->controller) { app->controller->NotifyParentWindowPositionChanged(); } break;
     case WM_GETMINMAXINFO: {

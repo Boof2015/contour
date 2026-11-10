@@ -3,6 +3,52 @@ const setupReports=new Map();
 const setupCache=new Map();
 let scanQueue=[],scanStarting=false,setupOperation=null,pendingSetup=null,inventoryRefreshing=false,engineSetup=null;
 let STARTUP=null,startupBusy=false;
+let INFO=null,infoLoading=false,infoError='',NOTICES=null,noticesLoading=false,noticesError='';
+function diagnosticDetails(){
+  const device=APP.devices.find(d=>d.id===APP.device),report=setupReports.get(APP.device);
+  return [`Contour ${INFO.version} (${INFO.architecture})`,`Windows: ${INFO.windows}`,`WebView2: ${INFO.webview}`,
+    `EQ: ${APP.eqEnabled===false?'Off':'On'}`,`Output: ${device?.name||'No output selected'}`,
+    `Format: ${device?.channels||'Unknown'} channels, ${device?.rate?device.rate+' Hz':'unknown sample rate'}`,
+    `Contour on this output: ${report?installationLabel(report):'Not checked'}`,
+    `Output available: ${device?.available?'Yes':'No'}`].join('\n');
+}
+function infoSettings(){
+  return `<div class="settings-head"><h1>Info</h1></div><div id="infoPanel">${infoPanel()}</div>`;
+}
+function infoPanel(){
+  const pending=infoLoading||!INFO;
+  return `<section class="info-product"><div class="info-wordmark">${WORDMARK}</div><p>${INFO?`Version ${esc(INFO.version)} <span>· ${esc(INFO.architecture)}</span>`:'Reading version…'}</p></section>
+    <div class="info-links"><button class="settings-button" data-info-link="project">GitHub project ${I('external')}</button><button class="settings-button" data-info-link="issues">Report an issue ${I('external')}</button></div>
+    ${infoError?`<p class="settings-notice" role="status">${esc(infoError)} <button class="settings-button" data-info-retry>Try again</button></p>`:''}
+    <section class="info-section"><h2>System</h2><dl class="info-facts"><dt>Windows</dt><dd>${esc(INFO?.windows||'…')}</dd><dt>WebView2</dt><dd>${esc(INFO?.webview||'…')}</dd></dl></section>
+    <section class="info-section"><div class="info-section-head"><div><h2>Troubleshooting</h2><p>Copy these details when reporting an issue.</p></div><button class="settings-button" data-info-copy ${pending?'disabled':''}>${I('copy')}Copy details</button></div><details class="info-diagnostics"><summary>View details</summary><pre id="infoDiagnostics">${INFO?esc(diagnosticDetails()):'Reading details…'}</pre></details></section>
+    <details class="info-section info-notices"><summary>Third-party notices</summary><div id="infoNotices">${noticesBody()}</div></details>`;
+}
+async function loadInformation(){
+  if(INFO||infoLoading)return;
+  infoLoading=true;infoError='';
+  try{INFO=await rpc('information',{action:'state'});}
+  catch(error){infoError=error.message;}
+  finally{infoLoading=false;const panel=$('#infoPanel');if(panel)panel.innerHTML=infoPanel();}
+}
+function noticesBody(){
+  if(NOTICES)return NOTICES.map(item=>`<details class="info-license"><summary>${esc(item.name)}</summary><pre>${esc(item.text)}</pre></details>`).join('');
+  if(noticesError)return `<p role="status">${esc(noticesError)}</p><button class="settings-button" data-notices-retry>Try again</button>`;
+  return '<p>Reading bundled notices…</p>';
+}
+async function loadNotices(){
+  if(NOTICES||noticesLoading)return;
+  noticesLoading=true;noticesError='';
+  try{NOTICES=await rpc('information',{action:'notices'});}
+  catch(error){noticesError=error.message;}
+  finally{noticesLoading=false;const body=$('#infoNotices');if(body)body.innerHTML=noticesBody();}
+}
+async function informationAction(button,args){
+  button.disabled=true;
+  try{await rpc('information',args);if(args.action==='copy')toast('Details copied');}
+  catch(error){toast(error.message);}
+  finally{button.disabled=false;}
+}
 function startupPreference(){
   return `<div><h2>Start with Windows</h2><p>${esc(STARTUP?.note||'Checking Windows startup settings…')}</p></div><button class="sw${STARTUP?.enabled?' on':''}" data-start-with-windows aria-label="Start with Windows" aria-pressed="${!!STARTUP?.enabled}" ${startupBusy||!STARTUP?.available?'disabled':''}></button>`;
 }
@@ -82,7 +128,7 @@ function compatibilityLabel(d,s){
   return s?.canInstall?'Ready to test':'Not checked';
 }
 function settingsView(){
-  return `<div class="body settings-body"><aside class="side settings-nav"><button class="settings-back" data-act="back-eq">${I('back')}Back to EQ</button><nav aria-label="Settings"><button data-settings-tab="outputs" class="${S.settingsTab==='outputs'?'sel':''}">${I('speaker')}Outputs</button><button data-settings-tab="general" class="${S.settingsTab==='general'?'sel':''}">${I('settings')}General</button></nav></aside><main class="settings-main" id="settingsMain">${S.settingsTab==='general'?generalSettings():outputSettings()}</main></div>`;
+  return `<div class="body settings-body"><aside class="side settings-nav"><button class="settings-back" data-act="back-eq">${I('back')}Back to EQ</button><nav aria-label="Settings"><button data-settings-tab="outputs" class="${S.settingsTab==='outputs'?'sel':''}">${I('speaker')}Outputs</button><button data-settings-tab="general" class="${S.settingsTab==='general'?'sel':''}">${I('settings')}General</button><button data-settings-tab="info" class="${S.settingsTab==='info'?'sel':''}">${I('info')}Info</button></nav></aside><main class="settings-main" id="settingsMain">${S.settingsTab==='info'?infoSettings():S.settingsTab==='general'?generalSettings():outputSettings()}</main></div>`;
 }
 function generalSettings(){
   return `<div class="settings-head"><h1>General</h1></div>
@@ -172,7 +218,8 @@ async function openSettings(tab='outputs',endpoint=null){
   document.activeElement?.blur();endGesture();await flush();
   S.pop=null;S.view='settings';S.settingsTab=tab;S.settingsDevice=endpoint;S.setupConfirm=null;render();
   if(tab==='outputs')refreshDevices();
-  else startupSettings();
+  else if(tab==='general')startupSettings();
+  else if(tab==='info')loadInformation();
 }
 async function refreshDevices(force=false){
   if(setupOperation||inventoryRefreshing)return;
@@ -288,10 +335,14 @@ function setupAct(action){
   else if(action==='open-eq'){S.openEditorDevice=d.id;command('device',{id:d.id},true);}
 }
 document.addEventListener('click',e=>{
+  const infoLink=e.target.closest('[data-info-link]');if(infoLink){informationAction(infoLink,{action:'link',name:infoLink.dataset.infoLink});return;}
+  const infoCopy=e.target.closest('[data-info-copy]');if(infoCopy&&!infoCopy.disabled){informationAction(infoCopy,{action:'copy',text:$('#infoDiagnostics').textContent});return;}
+  if(e.target.closest('[data-info-retry]')){loadInformation();return;}
+  if(e.target.closest('[data-notices-retry]')){loadNotices();return;}
   if(e.target.closest('[data-start-with-windows]')){if(STARTUP?.available)startupSettings(!STARTUP.enabled);return;}
   if(e.target.closest('[data-start-in-tray]')){command('preferences',{startInTray:!APP.startInTray},true);return;}
   if(e.target.closest('[data-close-to-tray]')){command('preferences',{closeToTray:APP.closeToTray===false},true);return;}
-  const tab=e.target.closest('[data-settings-tab]');if(tab){S.settingsTab=tab.dataset.settingsTab;render();if(S.settingsTab==='outputs')scanNext();else startupSettings();return;}
+  const tab=e.target.closest('[data-settings-tab]');if(tab){S.settingsTab=tab.dataset.settingsTab;render();if(S.settingsTab==='outputs')scanNext();else if(S.settingsTab==='general')startupSettings();else if(S.settingsTab==='info')loadInformation();return;}
   const theme=e.target.closest('[data-theme-choice]');if(theme){S.theme=theme.dataset.themeChoice;localStorage.setItem('theme',S.theme);render();syncWindowTheme();return;}
   const engine=e.target.closest('[data-engine-act]');if(engine){engineAct(engine.dataset.engineAct);return;}
   const action=e.target.closest('[data-setup-act]');if(action){setupAct(action.dataset.setupAct);return;}
@@ -303,6 +354,7 @@ document.addEventListener('click',e=>{
 });
 document.addEventListener('keydown',e=>{if(e.target.matches?.('[data-device-row]')&&(e.key==='Enter'||e.key===' ')){e.preventDefault();e.target.click();}});
 document.addEventListener('toggle',e=>{
+  if(e.target.matches?.('.info-notices')){if(e.target.open)loadNotices();return;}
   if(!e.target.matches?.('.disconnected-devices'))return;
   S.showDisconnected=e.target.open;
   if(S.showDisconnected){

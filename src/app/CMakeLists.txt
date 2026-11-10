@@ -10,10 +10,11 @@ FetchContent_Declare(webview2
     DOWNLOAD_NAME webview2.zip DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
 FetchContent_MakeAvailable(nlohmann_json webview2)
 
-add_library(contour-app-model STATIC model.cpp audio_connection.cpp startup.cpp)
+add_library(contour-app-model STATIC model.cpp audio_connection.cpp startup.cpp app_info.cpp)
 contour_target(contour-app-model)
 target_include_directories(contour-app-model PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
-target_link_libraries(contour-app-model PUBLIC contour-profile-device-session contour-eq-import nlohmann_json::nlohmann_json advapi32)
+target_include_directories(contour-app-model PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+target_link_libraries(contour-app-model PUBLIC contour-profile-device-session contour-eq-import nlohmann_json::nlohmann_json advapi32 shell32 user32)
 
 add_library(contour-app-setup STATIC setup.cpp)
 contour_target(contour-app-setup)

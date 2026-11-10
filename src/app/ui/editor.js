@@ -98,6 +98,8 @@ const PATHS = {
   dots: '<circle cx="3.5" cy="8" r=".9" fill="currentColor"/><circle cx="8" cy="8" r=".9" fill="currentColor"/><circle cx="12.5" cy="8" r=".9" fill="currentColor"/>',
   undo: '<path d="M5.5 2.5 2.5 5.5l3 3"/><path d="M2.8 5.5h6.7a4 4 0 0 1 0 8H7"/>', redo: '<path d="M10.5 2.5l3 3-3 3"/><path d="M13.2 5.5H6.5a4 4 0 0 0 0 8H9"/>',
   copy: '<rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M3 10.5V3.8c0-.7.6-1.3 1.3-1.3h6.2"/>',
+  info: '<circle cx="8" cy="8" r="6"/><path d="M8 7v4M8 4.5h.01"/>',
+  external: '<path d="M9 2.5h4.5V7M13 3 7 9M6 3H3v10h10v-3"/>',
   trash: '<path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5"/>', x: '<path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/>',
   pen: '<path d="M10.5 3l2.5 2.5L6 12.5H3.5V10z"/>', export: '<path d="M8 10V2.5M5 5.5l3-3 3 3"/><path d="M2.5 11v2.5h11V11"/>', import: '<path d="M8 2.5v7.5M5 7l3 3 3-3"/><path d="M2.5 11v2.5h11V11"/>',
   back: '<path d="M10 3.5 5.5 8l4.5 4.5"/>', grid: '<rect x="2.5" y="2.5" width="4.5" height="4.5" rx="1"/><rect x="9" y="2.5" width="4.5" height="4.5" rx="1"/><rect x="2.5" y="9" width="4.5" height="4.5" rx="1"/><rect x="9" y="9" width="4.5" height="4.5" rx="1"/>',

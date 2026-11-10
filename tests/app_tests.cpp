@@ -1,5 +1,6 @@
 #include "model.h"
 #include "startup.h"
+#include "app_info.h"
 #include "control_test_support.h"
 #include "test_support.h"
 #include <contour/peq_import.h>
@@ -523,6 +524,25 @@ int wmain(int argc,wchar_t** argv){
     if(argc!=2||FAILED(CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED)))return 2;
     const auto dir=std::filesystem::path(argv[1])/(std::to_wstring(GetCurrentProcessId())+L"-"+std::to_wstring(GetTickCount64()));std::filesystem::create_directories(dir);
     test::Suite suite;
+    suite.run("app information reads bundled notices and restricts external actions",[&]{
+        const auto info=application_info("test-runtime");
+        require(!info.at("version").get<std::string>().empty()&&info.at("architecture")=="x64"&&info.at("webview")=="test-runtime","Missing app version or runtime metadata");
+        require(information_link("project")==L"https://github.com/Boof2015/contour"&&information_link("issues")==L"https://github.com/Boof2015/contour/issues/new/choose","Incorrect project destinations");
+        for(const auto* invalid:{"file:///C:/Windows/notepad.exe","https://example.com","../licenses/json.txt","issues?data=private"}) {
+            bool rejected=false;try{(void)information_link(invalid);}catch(const std::invalid_argument&){rejected=true;}
+            require(rejected,"External action accepted an arbitrary URL or file");
+        }
+        bool rejected=false;try{copy_information(nullptr,std::string(65537,'x'));}catch(const std::invalid_argument&){rejected=true;}
+        require(rejected,"Oversized clipboard text reached the Windows clipboard");
+        const auto assets=dir/L"info"/L"ui",licenses=assets.parent_path()/L"licenses";
+        std::filesystem::create_directories(assets/L"fonts");std::filesystem::create_directories(licenses);
+        for(const auto& file:{licenses/L"json.txt",licenses/L"WebView2.txt",licenses/L"WebView2-NOTICE.txt",assets/L"fonts"/L"OFL.txt"})std::ofstream(file,std::ios::binary)<<"License body <text>\n";
+        const auto notices=third_party_notices(assets);
+        require(notices.size()==4&&notices[0]["text"]=="License body <text>\n","Bundled notice text changed");
+        std::filesystem::remove(licenses/L"WebView2.txt");
+        rejected=false;try{(void)third_party_notices(assets);}catch(const std::exception&){rejected=true;}
+        require(rejected,"Missing notice was silently omitted");
+    });
     suite.run("desktop startup reads real profile/runtime state without writes",[&]{readonly(dir/L"startup.library");});
     suite.run("edit/gesture/undo/save bridge with DSP acknowledgement and invalid input",[&]{edits(dir/L"edits.library");});
     suite.run("native REW import, independent channels, native graph coefficients and audio",[&]{import_and_curves(dir/L"import.library");});
