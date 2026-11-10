@@ -118,6 +118,9 @@ if(BUILD_TESTING)
         add_test(NAME desktop-setup-scan COMMAND "${CONTOUR_NODE_EXECUTABLE}"
             "${PROJECT_SOURCE_DIR}/tests/ui_setup_scan_tests.cjs" "${CMAKE_CURRENT_SOURCE_DIR}/ui")
         set_tests_properties(desktop-setup-scan PROPERTIES TIMEOUT 30)
+        add_test(NAME desktop-browser-runner COMMAND "${CONTOUR_NODE_EXECUTABLE}"
+            "${PROJECT_SOURCE_DIR}/tests/headless_browser_tests.cjs" "${CMAKE_BINARY_DIR}/browser-runner-checks")
+        set_tests_properties(desktop-browser-runner PROPERTIES TIMEOUT 90)
         add_test(NAME desktop-ui-interactions COMMAND "${CONTOUR_NODE_EXECUTABLE}"
             "${PROJECT_SOURCE_DIR}/tests/ui_interaction_tests.cjs" "${CMAKE_CURRENT_SOURCE_DIR}/ui" "${CMAKE_BINARY_DIR}/ui-interaction-checks")
         set_tests_properties(desktop-ui-interactions PROPERTIES TIMEOUT 60)

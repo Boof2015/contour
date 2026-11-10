@@ -1,5 +1,6 @@
 // The actual tray document with an isolated editor relay; no audio endpoints.
-const fs=require('node:fs'),path=require('node:path'),http=require('node:http'),{spawn}=require('node:child_process');
+const fs=require('node:fs'),path=require('node:path'),http=require('node:http');
+const {runBrowser}=require('./headless_browser.cjs');
 const ui=path.resolve(process.argv[2]),work=path.resolve(process.argv[3]),preview=process.argv.includes('--preview');
 const edge=[process.env.CONTOUR_TEST_BROWSER,path.join(process.env['ProgramFiles(x86)']||'','Microsoft/Edge/Application/msedge.exe')].find(p=>p&&fs.existsSync(p));
 if(!edge)throw Error('Microsoft Edge is required');
@@ -56,11 +57,13 @@ const server=http.createServer((req,res)=>{
   const relative=pathname.slice(1);if(!['styles.css','editor.js','tray.js','wordmark.svg','fonts/Manrope.ttf'].includes(relative)){res.writeHead(404).end();return;}
   res.setHeader('Content-Type',relative.endsWith('.css')?'text/css':relative.endsWith('.js')?'text/javascript':relative.endsWith('.svg')?'image/svg+xml':'font/ttf');res.end(fs.readFileSync(path.join(ui,relative)));
 });
-server.listen(0,'127.0.0.1',()=>{
+server.listen(0,'127.0.0.1',async()=>{
   const url=`http://127.0.0.1:${server.address().port}/`;
   if(preview){console.log(url);return;}
-  const child=spawn(edge,['--headless=new','--disable-gpu','--no-first-run','--disable-background-networking','--disable-extensions','--disable-sync',`--user-data-dir=${profile}`,'--window-size=368,640','--dump-dom','--virtual-time-budget=3000',url],{windowsHide:true});
-  let output='';child.stdout.on('data',b=>output+=b);child.stderr.resume();
-  const timeout=setTimeout(()=>child.kill(),20000);
-  child.on('exit',()=>{clearTimeout(timeout);server.close();const match=output.match(/<pre id="result">([\s\S]*?)<\/pre>/);if(match?.[1]==='PASS')console.log('PASS tray actions, draft identity, global bypass, focus stability, theme, scrolling, Escape and empty state');else{console.error(match?.[1]||'Tray test did not finish');process.exitCode=1;}});
+  try{
+    const result=await runBrowser({edge,profile,url,resultId:'result',timeoutMs:20000,args:['--window-size=368,640']});
+    if(result!=='PASS')throw Error(result);
+    console.log('PASS tray actions, draft identity, global bypass, focus stability, theme, scrolling, Escape and empty state');
+  }catch(error){console.error(error);process.exitCode=1;}
+  finally{server.close();}
 });

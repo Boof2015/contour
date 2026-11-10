@@ -1,6 +1,7 @@
 // Real Chromium DOM/layout regression checks with a fake native host. The host
 // never enumerates devices, writes the profile library, or touches live audio.
-const fs=require('node:fs'),path=require('node:path'),http=require('node:http'),{spawn}=require('node:child_process');
+const fs=require('node:fs'),path=require('node:path'),http=require('node:http');
+const {runBrowser}=require('./headless_browser.cjs');
 const ui=path.resolve(process.argv[2]),work=path.resolve(process.argv[3]),preview=process.argv.includes('--preview');
 const edge=[process.env.CONTOUR_TEST_BROWSER,path.join(process.env['ProgramFiles(x86)']||'', 'Microsoft/Edge/Application/msedge.exe'),path.join(process.env.ProgramFiles||'', 'Microsoft/Edge/Application/msedge.exe')].find(p=>p&&fs.existsSync(p));
 if(!edge)throw Error('Microsoft Edge is required for the UI interaction checks');
@@ -93,6 +94,7 @@ const fixture=()=>{
 };
 const checks=async()=>{
   const results=[],assert=(ok,msg)=>{if(!ok)throw Error(msg);},wait=ms=>new Promise(r=>setTimeout(r,ms)),key=(el,value)=>el.dispatchEvent(new KeyboardEvent('keydown',{key:value,bubbles:true,cancelable:true}));
+  window.testProgress=results;
   const finish=error=>{document.body.insertAdjacentHTML('beforeend','<pre id="test-results"></pre>');document.getElementById('test-results').textContent=JSON.stringify({passed:!error,checks:results,error:error?.stack});};
   try{
     for(let i=0;i<50&&!P();i++)await wait(20);
@@ -465,18 +467,12 @@ const server=http.createServer((req,res)=>{
   const relative=url.pathname.slice(1);if(!['boot.js','editor.js','settings.js','app.js','interactions.js','styles.css','wordmark.svg','fonts/Manrope.ttf'].includes(relative)){res.writeHead(404).end();return;}
   res.setHeader('Content-Type',mime[path.extname(relative)]);res.end(fs.readFileSync(path.join(ui,relative)));
 });
-server.listen(0,'127.0.0.1',()=>{
+server.listen(0,'127.0.0.1',async()=>{
   if(preview){console.log(`Offline UI fixture: http://127.0.0.1:${server.address().port}/`);return;}
-  const child=spawn(edge,['--headless=new','--disable-gpu','--no-first-run','--disable-background-networking','--disable-extensions','--disable-sync',`--user-data-dir=${profile}`,'--dump-dom','--virtual-time-budget=12000',`http://127.0.0.1:${server.address().port}/`],{windowsHide:true});
-  let stdout='',stderr='';child.stdout.on('data',b=>stdout+=b);child.stderr.on('data',b=>stderr+=b);
-  const timeout=setTimeout(()=>{child.kill();},45000);
-  child.on('error',e=>{clearTimeout(timeout);server.close();console.error(e);process.exitCode=1;});
-  child.on('exit',()=>{
-    clearTimeout(timeout);server.close();
-    const match=stdout.match(/<pre id="test-results">([\s\S]*?)<\/pre>/);
-    if(!match){console.error('Browser did not finish interaction checks:',stderr.slice(-1800));process.exitCode=1;return;}
-    const result=JSON.parse(match[1].replaceAll('&amp;','&').replaceAll('&lt;','<').replaceAll('&gt;','>').replaceAll('&quot;','"'));
+  try{
+    const result=JSON.parse(await runBrowser({edge,profile,url:`http://127.0.0.1:${server.address().port}/`,resultId:'test-results'}));
     for(const check of result.checks)console.log('PASS '+check);
-    if(!result.passed){console.error(result.error);process.exitCode=1;}
-  });
+    if(!result.passed)throw Error(result.error);
+  }catch(error){console.error(error);process.exitCode=1;}
+  finally{server.close();}
 });
