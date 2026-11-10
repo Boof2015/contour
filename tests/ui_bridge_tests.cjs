@@ -68,8 +68,11 @@ async function main(){
 
   for(let i=0;i<200;i++)evaluate(`grid(${300+i});`);
   assert.ok(evaluate('grids.size')<=8,'Continuous resize retained unbounded frequency grids');
-  assert.equal(evaluate("parse('freq','3.2','kHz')"),3200);
-  assert.equal(evaluate("parse('freq','3200 Hz','kHz')"),3200);
+  assert.equal(evaluate("parse('freq','55')"),55);
+  assert.equal(evaluate("parse('freq','3.2')"),3.2);
+  assert.equal(evaluate("parse('freq','3200 Hz')"),3200);
+  assert.equal(evaluate("parse('freq','3.2 kHz')"),3200);
+  assert.equal(evaluate("parse('freq','55 kHz')"),null);
   assert.equal(evaluate("parse('q','-1','')"),null);
 
   evaluate('P().work.layers[0].gain=-3; queueEdit(); flush();');const first=await take('edit');

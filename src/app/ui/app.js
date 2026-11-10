@@ -76,7 +76,7 @@ document.addEventListener('input',async e=>{
     await flush();if(ticket!==inputRecoveryTicket||document.activeElement!==el)return;
     const work=rawWork(),layer=work.layers[S.sel];if(!layer)return;
     if(el.id==='lnIn'){if(!el.value.trim()){await rpc('recovery_input',{clear:true});return;}layer.name=el.value.trim();}
-    else {const value=parse(el.dataset.k,el.value,el.dataset.unit);if(value===null){await rpc('recovery_input',{clear:true});return;}setLayerField(layer,el.dataset.k,+el.dataset.i,value);}
+    else {const value=parse(el.dataset.k,el.value);if(value===null){await rpc('recovery_input',{clear:true});return;}setLayerField(layer,el.dataset.k,+el.dataset.i,value);}
     await rpc('recovery_input',{id:P().id,revision:P().revision,work});
   }catch{} // Invalid or superseded input is never applied to audio.
 });

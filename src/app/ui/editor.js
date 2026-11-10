@@ -57,7 +57,7 @@ const Ly = (name, all, mask, gain, on, filters) => ({ name, all, mask, gain, on,
 const M = '−';
 const sgn = v => (v > 0 ? '+' : v < 0 ? M : '');
 function show(k, v) {
-  if (k === 'freq') return v < 1000 ? [v < 100 && Math.round(v) !== v ? v.toFixed(1) : String(Math.round(v)), 'Hz'] : [(v / 1000).toFixed(v < 10000 ? 2 : 1), 'kHz'];
+  if (k === 'freq') return [v < 100 && Math.round(v) !== v ? v.toFixed(1) : String(Math.round(v)), 'Hz'];
   if (k === 'q') return [v < 10 ? v.toFixed(2) : v.toFixed(1), ''];
   return [sgn(v) + Math.abs(v).toFixed(1), 'dB'];
 }
@@ -74,11 +74,11 @@ function setLayerField(layer,k,i,v) {
   else if (k === 'gain') f.gain = r1(clamp(v, -120, 36));
   else f.q = rq(clamp(v, .05, 1000));
 }
-// A bare number is read in the unit currently shown (3.2 in a kHz field means 3.2 kHz)
-function parse(k, text, unit) {
+// Frequency entry is always Hz; an explicit k/kHz suffix still supports pasted values.
+function parse(k, text) {
   const t = text.trim().toLowerCase().replace(/−/g, '-').replace(',', '.');
   let m;
-  if (k === 'freq') { m = t.match(/^([+-]?\d*\.?\d+)\s*(k|khz|hz)?$/); if (!m) return null; const kilo = m[2] ? m[2][0] === 'k' : unit === 'kHz'; const v = +m[1] * (kilo ? 1000 : 1); return v >= 1 && v < NYQ ? v : null; }
+  if (k === 'freq') { m = t.match(/^([+-]?\d*\.?\d+)\s*(k|khz|hz)?$/); if (!m) return null; const v = +m[1] * (m[2]?.startsWith('k') ? 1000 : 1); return v >= 1 && v < NYQ ? v : null; }
   if (k === 'q') { m = t.match(/^q?\s*(\d*\.?\d+)$/); if (!m) return null; return +m[1] >= .05 && +m[1] <= 1000 ? +m[1] : null; }
   m = t.match(/^([+-]?\d*\.?\d+)\s*(db)?$/); if (!m) return null; return +m[1] >= -120 && +m[1] <= 36 ? +m[1] : null;
 }

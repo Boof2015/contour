@@ -25,7 +25,7 @@ document.addEventListener('focusout', e => {
   const el = e.target; if (!el.matches || !el.matches('.win .fld input')) return;
   if (el.dataset.skip) { delete el.dataset.skip; refresh(false); return; }
   if (el.value === el.dataset.orig) return;
-  const v = parse(el.dataset.k, el.value, el.dataset.unit), fld = el.closest('.fld');
+  const v = parse(el.dataset.k, el.value), fld = el.closest('.fld');
   if (v === null) { fld.classList.add('bad'); setTimeout(() => { fld.classList.remove('bad'); refresh(); }, 700); return; }
   push(); set(el.dataset.k, +el.dataset.i, v); el.dataset.orig=el.value; refresh();
 });

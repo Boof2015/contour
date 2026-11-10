@@ -129,6 +129,19 @@ const checks=async()=>{
     S.theme='light';render();$('#type-0').click();assert(getComputedStyle($('#pop')).backgroundColor!==dark,'Filter menu ignored theme');
     key(document.activeElement,'Escape');S.theme='dark';render();results.push('Filter menu follows theme, supports arrows and Escape, and edits the actual draft');
 
+    const frequency=()=>$('.fld input[data-k="freq"][data-i="0"]');
+    assert(frequency().value==='1000'&&frequency().nextElementSibling.textContent==='Hz','Frequency field starts in kHz');
+    const frequencyRequests=window.testRequests.length;
+    frequency().focus();frequency().value='55';frequency().dispatchEvent(new Event('input',{bubbles:true}));await wait(40);
+    const frequencyRecovery=window.testRequests.slice(frequencyRequests).find(r=>r.op==='recovery_input'&&!r.clear);
+    assert(frequencyRecovery?.work.layers[S.sel].filters[0].freq===55&&L().filters[0].freq===1000,'Pending frequency recovery used the previous display unit or changed audio');
+    key(frequency(),'Enter');await wait(60);
+    assert(L().filters[0].freq===55&&window.testEdits.at(-1).layers[S.sel].filters[0].freq===55,'Typing 55 into a high-frequency filter did not commit 55 Hz');
+    frequency().focus();frequency().value='5500';frequency().blur();await wait(60);
+    assert(L().filters[0].freq===5500&&frequency().value==='5500'&&frequency().nextElementSibling.textContent==='Hz','Frequency field switched units above 1000 Hz');
+    frequency().focus();frequency().value='1000';key(frequency(),'Enter');await wait(60);
+    results.push('Frequency entry and recovery stay in Hz across low and high values, with Enter and blur committing the correct native edit');
+
     const statusNode=$('.status-label'),statusRoot=$('#statusbar');
     for(const running of ['processed_match','transitioning','unknown','loaded_difference','processed_match']){
       window.testStatus({endpoint:'ready',running,applied:running==='processed_match'});
