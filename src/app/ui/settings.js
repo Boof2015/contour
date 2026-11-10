@@ -17,12 +17,12 @@ function infoSettings(){
 }
 function infoPanel(){
   const pending=infoLoading||!INFO;
-  return `<section class="info-product"><div class="info-wordmark">${WORDMARK}</div><p>${INFO?`Version ${esc(INFO.version)} <span>· ${esc(INFO.architecture)}</span>`:'Reading version…'}</p></section>
+  return `<section class="info-product"><div class="info-wordmark">${WORDMARK}</div><p>${INFO?`Version ${esc(INFO.version)} <span>· ${esc(INFO.architecture)}</span>`:'Reading version…'}</p><p>Made by Boof2015 <span>· GPL-3.0-only</span></p></section>
     <div class="info-links"><button class="settings-button" data-info-link="project">GitHub project ${I('external')}</button><button class="settings-button" data-info-link="issues">Report an issue ${I('external')}</button></div>
     ${infoError?`<p class="settings-notice" role="status">${esc(infoError)} <button class="settings-button" data-info-retry>Try again</button></p>`:''}
     <section class="info-section"><h2>System</h2><dl class="info-facts"><dt>Windows</dt><dd>${esc(INFO?.windows||'…')}</dd><dt>WebView2</dt><dd>${esc(INFO?.webview||'…')}</dd></dl></section>
     <section class="info-section"><div class="info-section-head"><div><h2>Troubleshooting</h2><p>Copy these details when reporting an issue.</p></div><button class="settings-button" data-info-copy ${pending?'disabled':''}>${I('copy')}Copy details</button></div><details class="info-diagnostics"><summary>View details</summary><pre id="infoDiagnostics">${INFO?esc(diagnosticDetails()):'Reading details…'}</pre></details></section>
-    <details class="info-section info-notices"><summary>Third-party notices</summary><div id="infoNotices">${noticesBody()}</div></details>`;
+    <details class="info-section info-notices"><summary>License and third-party notices</summary><div id="infoNotices">${noticesBody()}</div></details>`;
 }
 async function loadInformation(){
   if(INFO||infoLoading)return;

@@ -192,7 +192,7 @@ struct App {
                 const auto action=request.at("action").get<std::string>();
                 Json result=Json::object();
                 if(action=="state")result=contour::app::application_info(webview_version);
-                else if(action=="notices")result=contour::app::third_party_notices(assets);
+                else if(action=="notices")result=contour::app::license_notices(assets);
                 else if(action=="copy")contour::app::copy_information(window,request.at("text").get<std::string>());
                 else if(action=="link") {
                     const auto name=request.at("name").get<std::string>();

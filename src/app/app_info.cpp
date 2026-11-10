@@ -49,9 +49,10 @@ void copy_information(HWND owner,std::string_view text) {
     if(!EmptyClipboard()||!SetClipboardData(CF_UNICODETEXT,memory.value))throw std::runtime_error("Could not copy the information. Try again.");
     memory.value=nullptr; // Windows owns the allocation after SetClipboardData.
 }
-Json third_party_notices(const std::filesystem::path& assets) {
+Json license_notices(const std::filesystem::path& assets) {
     struct Notice { const char* name;std::filesystem::path path; };
     const Notice notices[]={
+        {"Contour · GPL-3.0-only",assets.parent_path()/L"LICENSE"},
         {"nlohmann/json · MIT License",assets.parent_path()/L"licenses"/L"json.txt"},
         {"Manrope · SIL Open Font License",assets/L"fonts"/L"OFL.txt"},
         {"Microsoft WebView2 · License",assets.parent_path()/L"licenses"/L"WebView2.txt"},

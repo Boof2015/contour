@@ -50,6 +50,7 @@ add_custom_target(contour-ui-assets ALL
         "${PROJECT_SOURCE_DIR}/tools/deployment/RegistryStore.cs"
         "$<TARGET_FILE_DIR:contour>/setup"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/ui" "$<TARGET_FILE_DIR:contour>/ui"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${PROJECT_SOURCE_DIR}/LICENSE" "$<TARGET_FILE_DIR:contour>/LICENSE"
     COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:contour>/licenses"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different "${nlohmann_json_SOURCE_DIR}/LICENSE.MIT" "$<TARGET_FILE_DIR:contour>/licenses/json.txt"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different "${webview2_SOURCE_DIR}/LICENSE.txt" "$<TARGET_FILE_DIR:contour>/licenses/WebView2.txt"

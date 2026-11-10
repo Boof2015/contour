@@ -536,11 +536,11 @@ int wmain(int argc,wchar_t** argv){
         require(rejected,"Oversized clipboard text reached the Windows clipboard");
         const auto assets=dir/L"info"/L"ui",licenses=assets.parent_path()/L"licenses";
         std::filesystem::create_directories(assets/L"fonts");std::filesystem::create_directories(licenses);
-        for(const auto& file:{licenses/L"json.txt",licenses/L"WebView2.txt",licenses/L"WebView2-NOTICE.txt",assets/L"fonts"/L"OFL.txt"})std::ofstream(file,std::ios::binary)<<"License body <text>\n";
-        const auto notices=third_party_notices(assets);
-        require(notices.size()==4&&notices[0]["text"]=="License body <text>\n","Bundled notice text changed");
+        for(const auto& file:{assets.parent_path()/L"LICENSE",licenses/L"json.txt",licenses/L"WebView2.txt",licenses/L"WebView2-NOTICE.txt",assets/L"fonts"/L"OFL.txt"})std::ofstream(file,std::ios::binary)<<"License body <text>\n";
+        const auto notices=license_notices(assets);
+        require(notices.size()==5&&notices[0]["name"]=="Contour · GPL-3.0-only"&&notices[0]["text"]=="License body <text>\n","Bundled notice text changed");
         std::filesystem::remove(licenses/L"WebView2.txt");
-        rejected=false;try{(void)third_party_notices(assets);}catch(const std::exception&){rejected=true;}
+        rejected=false;try{(void)license_notices(assets);}catch(const std::exception&){rejected=true;}
         require(rejected,"Missing notice was silently omitted");
     });
     suite.run("desktop startup reads real profile/runtime state without writes",[&]{readonly(dir/L"startup.library");});

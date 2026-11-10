@@ -9,7 +9,7 @@ function Assert-ReleasePath([string]$Path) {
     }
 }
 function Get-ReleaseFiles {
-    @('contour.exe','contour-apo.dll','contour-deploy-info.exe','contour-apo-host.exe','contour-endpoint-check.exe',
+    @('contour.exe','contour-apo.dll','contour-deploy-info.exe','contour-apo-host.exe','contour-endpoint-check.exe','LICENSE',
       'ui/index.html','ui/tray.html','ui/styles.css','ui/boot.js','ui/editor.js','ui/app.js','ui/settings.js','ui/interactions.js','ui/tray.js','ui/wordmark.svg',
       'ui/fonts/Manrope.ttf','ui/fonts/OFL.txt','licenses/json.txt','licenses/WebView2.txt','licenses/WebView2-NOTICE.txt',
       'setup/contour-setup.ps1','setup/contour-uninstall.ps1','setup/SetupHost.ps1','setup/ProductRemoval.ps1','setup/DeviceSetup.ps1',
